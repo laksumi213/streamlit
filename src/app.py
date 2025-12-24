@@ -39,12 +39,10 @@ if env_keys:
 else:
     API_KEYS = []
 
-# ★指定のモデルに変更
+# ★モデル指定
 MODEL_CANDIDATES = [
     "models/gemini-2.5-flash-lite",
     "models/gemini-2.5-flash",
-    # 万が一2.5がまだAPIで未解禁の場合の予備として既存も残すか、
-    # 完全に統一する場合は上記2つのみにしてください。一旦指定通りにします。
 ]
 current_key_index = 0
 
@@ -63,7 +61,6 @@ def generate_ultimate_rotation(prompt):
     if not API_KEYS:
         return "エラー: APIキーなし"
 
-    # 全キー × 全モデルで試行
     for _ in range(len(API_KEYS)):
         for model_name in MODEL_CANDIDATES:
             try:
@@ -71,9 +68,7 @@ def generate_ultimate_rotation(prompt):
                 response = model.generate_content(prompt)
                 return response.text
             except Exception:
-                continue  # 次のモデルへ
-
-        # キーローテーション
+                continue
         current_key_index = (current_key_index + 1) % len(API_KEYS)
         configure_genai()
 
@@ -149,7 +144,7 @@ def save_to_google_sheet(worksheet, df):
 
 
 # ============================================================
-# スクレイピング & AI解析ロジック (自動修復機能付き)
+# スクレイピング & AI解析ロジック
 # ============================================================
 
 BANK_MASTER_DB = {
@@ -175,7 +170,6 @@ BANK_MASTER_DB = {
 
 
 def search_new_url(bank_name):
-    """DuckDuckGoで新しいURLを探す"""
     try:
         query = f"{bank_name} 相続手続き"
         results = DDGS().text(query, max_results=1)
@@ -210,7 +204,6 @@ def extract_json_from_text(text):
 
 
 def run_selenium_and_extract(target_url):
-    """指定URLにアクセスして情報を抽出する処理（共通化）"""
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -243,53 +236,35 @@ def run_selenium_and_extract(target_url):
 
 
 def process_single_bank(bank_name, current_url):
-    """
-    銀行処理のメインロジック：
-    1. 既存URLがあればトライ
-    2. 失敗 or 空なら検索してトライ（自動修復）
-    """
-
-    # URL決定ロジック
     target_url = current_url
     if not target_url or pd.isna(target_url):
         if bank_name in BANK_MASTER_DB:
             target_url = BANK_MASTER_DB[bank_name]
 
-    # 1回目のトライ（URLがある場合）
     if target_url:
         st.write(f"   Using: {target_url}")
         res_json, status = run_selenium_and_extract(target_url)
-
-        # 成功してJSONも取れたら終了
         data = extract_json_from_text(res_json)
         if status == "Success" and data:
             return res_json, "Success", target_url
 
-    # ここに来る＝URLがない、または1回目が失敗した
-    st.write("   ⚠️ 情報取得失敗。URLを検索してリトライします...")
-
-    # 新しいURLを探す
+    st.write("   ⚠️ 取得失敗。URL検索リトライ...")
     found_url = search_new_url(bank_name)
     if not found_url:
         return None, "検索失敗", target_url
 
     st.write(f"   🔍 発見: {found_url}")
-
-    # 2回目のトライ（検索したURLで）
     res_json, status = run_selenium_and_extract(found_url)
-    return res_json, status, found_url  # 成功しても失敗してもこの結果を返す
+    return res_json, status, found_url
 
 
-# --- 便利なJS機能: チャット入力欄にフォーカスを当てる ---
 def focus_chat_input():
     js = """
     <script>
         function setFocus() {
             const doc = window.parent.document;
             const textareas = doc.querySelectorAll('textarea[data-testid="stChatInputTextArea"]');
-            if (textareas.length > 0) {
-                textareas[0].focus();
-            }
+            if (textareas.length > 0) { textareas[0].focus(); }
         }
         setTimeout(setFocus, 300);
     </script>
@@ -298,7 +273,7 @@ def focus_chat_input():
 
 
 # ============================================================
-# ★ アプリケーション本体 (Page構成)
+# ★ アプリケーション本体
 # ============================================================
 
 st.set_page_config(page_title="銀行手続システム", layout="wide")
@@ -311,7 +286,7 @@ df, _ = get_google_sheet_data_cached()
 worksheet = get_worksheet_object()
 
 # ------------------------------------------------------------
-# PAGE 1: AIアシスタント (Chat Interface)
+# PAGE 1: AIアシスタント
 # ------------------------------------------------------------
 if page == "🤖 AIアシスタント (実務用)":
     st.title("🤖 銀行手続 AIコンシェルジュ")
@@ -377,9 +352,8 @@ if page == "🤖 AIアシスタント (実務用)":
             {"role": "assistant", "content": response_text}
         )
 
-
 # ------------------------------------------------------------
-# PAGE 2: マスタ管理 (Grid & Scraping)
+# PAGE 2: マスタ管理
 # ------------------------------------------------------------
 elif page == "📝 マスタ管理・更新 (管理者用)":
     st.title("📝 銀行マスタ管理画面")
@@ -406,7 +380,7 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
 
     with st.expander("🚀 データ一括更新パネル（管理者のみ操作）"):
         st.warning(
-            "⚠️ 全銀行の情報を更新するには時間がかかります（情報が見つからない場合、自動で検索してリトライします）。"
+            "⚠️ 時間がかかります（情報が見つからない場合、自動検索してリトライします）。"
         )
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -422,10 +396,7 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                         )
                         status.text(f"処理中: {bank}")
 
-                        # ★ここが改善点：結果だけでなく、最終的に採用したURLも返ってくる
                         res_json, stat, final_url = process_single_bank(bank, url)
-
-                        # URLが変わっていれば更新
                         if final_url:
                             df.at[i, "WebサイトURL"] = final_url
 
@@ -483,10 +454,17 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
 
     if df is not None:
         st.info("👇 行をクリックすると、下に詳細が表示されます。")
+
+        # ★ ここで「案1」の幅設定を適用！
         cfg_view = {
             "WebサイトURL": st.column_config.LinkColumn("URL", display_text="Link"),
-            "AI要約": st.column_config.TextColumn("AI要約", width="medium"),
+            "AI要約": st.column_config.TextColumn("AI要約", width="large"),  # 幅広に
+            "手続き方法": st.column_config.TextColumn(
+                "手続き方法", width="medium"
+            ),  # 中くらいに
         }
+
+        # ★ 「案3」の詳細ビュー機能
         event = st.dataframe(
             df,
             column_config=cfg_view,
