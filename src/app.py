@@ -34,7 +34,6 @@ if env_keys:
 else:
     API_KEYS = []
 
-# ★指定のモデル構成に統一
 MODEL_CANDIDATES = [
     "models/gemini-2.5-flash-lite",
     "models/gemini-2.5-flash",
@@ -317,38 +316,47 @@ worksheet = get_worksheet_object()
 # ------------------------------------------------------------
 if page == "🤖 AIアシスタント (実務用)":
     st.title("🤖 銀行手続 AIコンシェルジュ")
-    # ★ご指定のメッセージに変更
+    # ★ご指定の文言に統一
     st.info(
-        "「三菱UFJ」「みずほ銀行」など入力してください。なお、ufjなど部分的な言葉でもOKがです。"
+        "「三菱UFJ」「みずほ銀行」など入力してください。なお、ufjなど部分的な言葉でもOKです。"
     )
     focus_chat_input()
 
-    # --- Session State 初期化 ---
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "current_bank_data" not in st.session_state:
         st.session_state.current_bank_data = None
     if "candidate_list" not in st.session_state:
-        st.session_state.candidate_list = None  # 複数候補のリスト
+        st.session_state.candidate_list = None
 
-    # --- 入力処理ロジック ---
     def handle_input(user_text):
         st.session_state.messages.append({"role": "user", "content": user_text})
 
-        search_key = (
-            user_text.replace("手続き", "")
-            .replace("教えて", "")
-            .replace("銀行", "")
-            .strip()
-        )
+        # ★ここが修正ポイント：完全一致がある場合は、あいまい検索をスキップする
         found_candidates = []
+        full_match_found = False
+
         if df is not None:
-            for bank in df["金融機関名"].tolist():
-                if (bank in user_text) or (
-                    len(search_key) > 1 and search_key.lower() in bank.lower()
-                ):
-                    found_candidates.append(bank)
-        found_candidates = list(set(found_candidates))
+            all_banks = df["金融機関名"].tolist()
+            # 1. 完全一致チェック (例: ボタンで「三菱UFJ銀行」が送られてきた場合)
+            if user_text in all_banks:
+                found_candidates = [user_text]
+                full_match_found = True
+
+            # 2. 完全一致がない場合のみ、あいまい検索を行う
+            if not full_match_found:
+                search_key = (
+                    user_text.replace("手続き", "")
+                    .replace("教えて", "")
+                    .replace("銀行", "")
+                    .strip()
+                )
+                for bank in all_banks:
+                    if (bank in user_text) or (
+                        len(search_key) > 1 and search_key.lower() in bank.lower()
+                    ):
+                        found_candidates.append(bank)
+                found_candidates = list(set(found_candidates))
 
         if len(found_candidates) == 1:
             bank_name = found_candidates[0]
@@ -361,19 +369,17 @@ if page == "🤖 AIアシスタント (実務用)":
         elif len(found_candidates) > 1:
             st.session_state.candidate_list = found_candidates
             st.session_state.current_bank_data = None
-            msg = f"🤔 **「{search_key}」** に一致する銀行が複数あります。下から選択してください。"
+            msg = "🤔 複数の候補があります。下から選択してください。"
             st.session_state.messages.append({"role": "assistant", "content": msg})
 
         else:
             st.session_state.candidate_list = None
-            msg_searching = f"🕵️ **{search_key or user_text}** をWeb調査中..."
+            msg_searching = f"🕵️ **{user_text}** をWeb調査中..."
             st.session_state.messages.append(
                 {"role": "assistant", "content": msg_searching}
             )
-
-            with st.spinner("AIが調査中... (しばらくお待ちください)"):
-                data, status = fetch_bank_data_dynamic(search_key or user_text)
-
+            with st.spinner("AIが調査中..."):
+                data, status = fetch_bank_data_dynamic(user_text)
             if status in ["Success", "Fallback"] and data:
                 st.session_state.current_bank_data = data
                 msg_done = (
@@ -388,12 +394,10 @@ if page == "🤖 AIアシスタント (実務用)":
                 )
                 st.session_state.current_bank_data = None
 
-    # --- 画面描画 ---
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # 候補ボタン (消えないように配置)
     if st.session_state.candidate_list:
         st.markdown("---")
         st.markdown("##### 🔍 候補を選択してください")
@@ -406,15 +410,12 @@ if page == "🤖 AIアシスタント (実務用)":
                 handle_input(cand)
                 st.rerun()
 
-    # 7項目ボタン
     if st.session_state.current_bank_data and not st.session_state.candidate_list:
         data = st.session_state.current_bank_data
         st.markdown("---")
         st.markdown(f"##### 👇 **{data['金融機関名']}** の詳細メニュー")
-
         b1, b2, b3, b4 = st.columns(4)
         b5, b6, b7, b8 = st.columns(4)
-
         if b1.button("📞 連絡先", use_container_width=True):
             st.session_state.messages.append(
                 {"role": "assistant", "content": f"**📞 連絡先**\n{data['電話番号']}"}
@@ -455,7 +456,6 @@ if page == "🤖 AIアシスタント (実務用)":
             st.session_state.messages.append({"role": "assistant", "content": full_msg})
             st.rerun()
 
-    # 入力欄
     if prompt := st.chat_input("銀行名を入力..."):
         handle_input(prompt)
         st.rerun()
@@ -499,8 +499,6 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                 for i, row in df.iterrows():
                     bank = row["金融機関名"]
                     status.text(f"調査中: {bank}")
-                    # 管理画面用の処理
-                    # process_single_bank 相当のロジックを実行 (簡易化のためfetchを使用)
                     res_data, stat = fetch_bank_data_dynamic(bank)
                     if stat in ["Success", "Fallback"] and res_data:
                         for k in COLS:
