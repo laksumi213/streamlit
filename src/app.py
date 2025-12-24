@@ -9,6 +9,7 @@ import google.generativeai as genai
 import gspread
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from duckduckgo_search import DDGS
 from gspread_dataframe import set_with_dataframe
@@ -286,32 +287,41 @@ def fetch_bank_data_dynamic(bank_name):
     return None, "失敗"
 
 
-# ★新機能: ピンポイント調査関数
 def fetch_specific_detail(bank_name, topic):
-    """
-    データがない場合に、特定のトピック（例：残高証明）だけで検索し直す
-    """
     try:
-        # 1. 検索実行 (スニペット取得)
         query = f"{bank_name} 相続 {topic}"
         results = DDGS().text(query, max_results=3)
         if not results:
             return "情報が見つかりませんでした。"
-
         snippet_text = "\n".join([f"- {r.get('body', '')}" for r in results])
-
-        # 2. AIで要約
         prompt = f"""
         行政書士のアシスタントとして、以下の検索結果から
         「{bank_name}」の「{topic}」に関する手続き方法を簡潔にまとめてください。
         箇条書きで、実務に必要な情報だけを抽出してください。
-        
         --- 検索結果 ---
         {snippet_text}
         """
         return generate_ultimate_rotation(prompt)
     except Exception as e:
         return f"調査中にエラーが発生しました: {str(e)}"
+
+
+# ★オートフォーカス用の新スクリプト (st.text_input対応版)
+def focus_search_input():
+    js = """
+    <script>
+        function setFocus() {
+            const doc = window.parent.document;
+            // 全てのinput[type=text]を取得し、最初の要素にフォーカス
+            const inputs = doc.querySelectorAll('input[type="text"]');
+            if (inputs.length > 0) {
+                inputs[0].focus();
+            }
+        }
+        setTimeout(setFocus, 300);
+    </script>
+    """
+    components.html(js, height=0, width=0)
 
 
 # ============================================================
@@ -341,13 +351,12 @@ if page == "🤖 AIアシスタント (実務用)":
     if "candidate_list" not in st.session_state:
         st.session_state.candidate_list = None
     if "display_result" not in st.session_state:
-        st.session_state.display_result = ""  # 結果表示用
+        st.session_state.display_result = ""
     if "display_title" not in st.session_state:
         st.session_state.display_title = ""
 
     # --- ロジック ---
     def select_bank(bank_name_arg):
-        # DBからデータを取得
         if df is not None:
             found_row = df[df["金融機関名"] == bank_name_arg]
             if not found_row.empty:
@@ -360,7 +369,6 @@ if page == "🤖 AIアシスタント (実務用)":
                 )
                 return
 
-        # DBにない場合は調査ロジック
         with st.spinner(f"{bank_name_arg} をWeb調査中..."):
             data, status = fetch_bank_data_dynamic(bank_name_arg)
             if status in ["Success", "Fallback"] and data:
@@ -406,40 +414,30 @@ if page == "🤖 AIアシスタント (実務用)":
             st.session_state.display_title = "🤔 複数の候補があります"
             st.session_state.display_result = "上のリストから選択してください。"
         else:
-            # DBになければそのまま調査
             select_bank(user_text)
 
-    # --- UI上部: 銀行選択パネル (常に表示) ---
+    # --- UI: 検索バー (一本化) ---
     st.write("▼ **銀行を検索・選択**")
 
-    # 検索バー
-    search_query = st.text_input(
-        "🔍 銀行名を入力 (Enterで検索)", placeholder="例: ufj, ゆうちょ..."
-    )
-    if search_query:
-        # 入力があり、かつまだ処理していない場合のみ実行
-        # (Streamlitの仕様上、ここは毎回走るので、session_state等で制御しても良いがシンプルに)
-        # 今回はシンプルに、入力があるたびにフィルタリング＆ハンドリング
-        # ただし、ループを防ぐため、ボタンで確定させるUIの方が安全だが、Enter要望なのでこのまま
-        pass
+    # テキスト入力欄
+    search_query = st.text_input("🔍 銀行名を入力 (Enterで検索)", key="main_search_bar")
 
-    # 銀行一覧ボタン (フィルタリング付き)
+    # ★ここでフォーカスを強制適用
+    focus_search_input()
+
+    # 銀行一覧 (フィルタリング)
     visible_banks = []
     if df is not None:
         all_banks = df["金融機関名"].tolist()
         if search_query:
-            # インクリメンタル風フィルタ
             s_key = search_query.strip().lower()
             visible_banks = [b for b in all_banks if s_key in b.lower()]
-
-            # もしEnterが押された(=完全一致や調査要求)場合の処理をここに仕込むのは複雑になるため
-            # ユーザーが「リストになければ検索」という意図でEnterしたとみなす
         else:
             visible_banks = all_banks
 
-    # グリッド表示
+    # 一覧グリッド
     if visible_banks:
-        with st.container(height=200):  # スクロール可能領域に
+        with st.container(height=200):
             cols = st.columns(4)
             for idx, b_name in enumerate(visible_banks):
                 if cols[idx % 4].button(
@@ -448,20 +446,44 @@ if page == "🤖 AIアシスタント (実務用)":
                     select_bank(b_name)
                     st.rerun()
 
-    # Enter検索用 (リストにない場合など)
-    if search_query:
-        # フィルタ結果が0、またはユーザーが明示的にEnterで調査を求めた場合
-        # テキスト入力のcallbackは使わず、値の存在チェックで行う
-        # ここでは「リストクリック」を優先したいので、少しUIを工夫
-        if st.button(
-            f"「{search_query}」をWebで詳しく調査する",
-            type="primary",
-            use_container_width=True,
-        ):
-            handle_input(search_query)
-            st.rerun()
+    # Enter検索処理 (リストにない場合など、入力欄の値で検索実行)
+    # ユーザーがテキストを入力してEnterした瞬間、search_queryに値が入るので、
+    # リストクリック以外で、かつまだ結果が出ていない場合に実行するロジック
+    # (ただしst.text_inputはEnterでリランするので、ここで単純に呼び出すと無限ループのリスクがある。
+    #  ボタンクリックと区別するため、session stateを使うのが定石だが、
+    #  今回は「ボタンを押さずにEnterした場合」を拾う簡易策として、
+    #  「現在選択中の銀行」と「入力値」が一致しない場合に検索させる)
 
-    # 複数候補がある場合の追加ボタン
+    if search_query:
+        # 入力値があり、かつまだその銀行が選択状態になっていない(または候補選択中)なら実行
+        is_already_selected = False
+        if st.session_state.current_bank_data:
+            if st.session_state.current_bank_data["金融機関名"] == search_query:
+                is_already_selected = True
+
+        # 候補選択モードでもなく、選択済みでもない場合 -> 検索実行
+        if not is_already_selected and not st.session_state.candidate_list:
+            # ただし、これが毎リランごとに走ると重いので、
+            # ユーザーが意図的に入力したとみなす
+            # UI的に「検索実行」ボタンを置くのが一番安全だが、Enter要望なので
+            # ここでhandle_inputを呼ぶ。
+            # ※ボタンクリック時はst.rerun()でここに来る前に処理が終わるはず
+            pass
+
+    # 補足: Enterキーだけで動作させるためのトリガーボタン (非表示にはできないが、UX向上のため配置)
+    if search_query and not st.session_state.candidate_list:
+        # まだ詳細が出ていないなら検索ボタンを出す（Enterの代わり）
+        if (
+            not st.session_state.current_bank_data
+            or st.session_state.current_bank_data["金融機関名"] != search_query
+        ):
+            # 自動的に実行してしまうとループするので、「調査する」ボタンを出すか、
+            # あるいは visible_banks が 0 の時だけ自動実行するなど調整
+            if not visible_banks:
+                handle_input(search_query)
+                st.rerun()
+
+    # 候補選択
     if st.session_state.candidate_list:
         st.info("👇 以下の候補から選択してください")
         cands = st.session_state.candidate_list
@@ -475,20 +497,16 @@ if page == "🤖 AIアシスタント (実務用)":
 
     st.markdown("---")
 
-    # --- UI下部: 詳細パネル (選択中のみ表示) ---
+    # --- UI: 詳細パネル ---
     if st.session_state.current_bank_data:
         data = st.session_state.current_bank_data
-
         st.subheader(f"🏦 {data['金融機関名']}")
 
-        # 7つのメニューボタン
         b1, b2, b3, b4 = st.columns(4)
         b5, b6, b7, b8 = st.columns(4)
 
         target_topic = None
         topic_label = ""
-
-        # ボタン判定 & データ欠損時の即時調査ロジック
         if b1.button("📞 連絡先", use_container_width=True):
             target_topic = "電話番号"
             topic_label = "相続センター電話番号"
@@ -513,29 +531,15 @@ if page == "🤖 AIアシスタント (実務用)":
         if b8.button("💡 全て表示", use_container_width=True):
             target_topic = "ALL"
 
-        # 処理実行
         if target_topic:
             if target_topic == "ALL":
                 st.session_state.display_title = "💡 全情報"
-                st.session_state.display_result = f"""
-**📞 連絡先**: {data.get("電話番号", "")}
-**🧊 凍結**: {data.get("凍結方法", "")}
-**📄 残高証明**: {data.get("残高証明", "")}
-**📊 取引明細**: {data.get("取引明細", "")}
-**🚪 解約**: {data.get("解約手続", "")}
-**📈 投信**: {data.get("投信国債", "")}
-**🔐 貸金庫**: {data.get("貸金庫", "")}
-**💡 要約**: {data.get("AI要約", "")}
-                """
+                st.session_state.display_result = f"**📞 連絡先**: {data.get('電話番号', '')}\n**🧊 凍結**: {data.get('凍結方法', '')}\n**📄 残高証明**: {data.get('残高証明', '')}\n**📊 取引明細**: {data.get('取引明細', '')}\n**🚪 解約**: {data.get('解約手続', '')}\n**📈 投信**: {data.get('投信国債', '')}\n**🔐 貸金庫**: {data.get('貸金庫', '')}\n**💡 要約**: {data.get('AI要約', '')}"
             else:
-                # データチェック
                 content = data.get(target_topic, "")
                 if not content or content in ["", "記載なし", "不明"]:
-                    # ★ここが新機能: データがないならその場で調べる
                     st.session_state.display_title = f"🔍 {topic_label} (Web調査中...)"
-                    with st.spinner(
-                        f"データが空のため、Webで「{topic_label}」を再調査しています..."
-                    ):
+                    with st.spinner(f"Webで「{topic_label}」を再調査しています..."):
                         fetched_info = fetch_specific_detail(
                             data["金融機関名"], topic_label
                         )
@@ -544,18 +548,14 @@ if page == "🤖 AIアシスタント (実務用)":
                 else:
                     st.session_state.display_title = f"✅ {topic_label}"
                     st.session_state.display_result = content
-
             st.rerun()
 
-        # 結果表示エリア
         if st.session_state.display_result:
             with st.container(border=True):
                 st.markdown(f"#### {st.session_state.display_title}")
                 st.markdown(st.session_state.display_result)
-
         if data.get("WebサイトURL"):
             st.link_button("🔗 公式サイトを開く", data["WebサイトURL"])
-
     else:
         st.info("👆 上のリストから銀行を選択するか、検索してください。")
 
