@@ -20,12 +20,26 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ============================================================
-# ★設定エリア
+# ★設定エリア (エラー回避強化版)
 # ============================================================
 
 if "GOOGLE_API_KEYS" in st.secrets:
+    # Cloud環境などで secrets.toml がある場合
     env_keys = st.secrets["GOOGLE_API_KEYS"]
 else:
+    # ローカル環境などで secrets.toml がない場合 -> .env を探す
+    # (st.secretsへのアクセス自体がエラーになるのを防ぐため、try-exceptは不要な書き方に変更)
+    # Streamlitの仕様上、st.secretsへのアクセスはファイルがないとエラーになることがあるため、
+    # 念のため以下のように安全に取得します。
+    try:
+        env_keys = st.secrets.get("GOOGLE_API_KEYS")
+    except:
+        # ファイルが物理的にない場合はここに来る
+        load_dotenv()
+        env_keys = os.getenv("GOOGLE_API_KEYS")
+
+if not env_keys:
+    # 念押しのロード
     load_dotenv()
     env_keys = os.getenv("GOOGLE_API_KEYS")
 
@@ -53,7 +67,7 @@ configure_genai()
 def generate_ultimate_rotation(prompt):
     global current_key_index
     if not API_KEYS:
-        return "エラー: APIキーなし"
+        return "エラー: APIキーなし (.envファイルを確認してください)"
 
     for _ in range(len(API_KEYS)):
         for model_name in MODEL_CANDIDATES:
@@ -72,7 +86,7 @@ def generate_ultimate_rotation(prompt):
 # ★ Google Sheets & Data Logic
 # ============================================================
 
-# ★ここを指定のURLに変更しました
+# 指定のURL
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1kQJ7j6jgs0RqS1IRvrdyuNseZ9GKgov5YXiDq-vawCc/edit?gid=0#gid=0"
 
 
@@ -82,16 +96,27 @@ def get_google_sheet_data_cached():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    if "gcp_service_account" in st.secrets:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    else:
-        # ローカル実行時はこのファイルを探しに行きます
+
+    # 認証情報の取得ロジック
+    creds = None
+
+    # 1. st.secrets (Cloud用) をトライ
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds_dict = st.secrets["gcp_service_account"]
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    except:
+        pass
+
+    # 2. ダメならローカルファイル (service_account.json) をトライ
+    if not creds:
         json_file = "service_account.json"
         if os.path.exists(json_file):
             creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
-        else:
-            return None, None
+
+    if not creds:
+        return None, None
+
     client = gspread.authorize(creds)
     try:
         sheet = client.open_by_url(SHEET_URL)
@@ -111,15 +136,23 @@ def get_worksheet_object():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    if "gcp_service_account" in st.secrets:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    else:
+
+    creds = None
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds_dict = st.secrets["gcp_service_account"]
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    except:
+        pass
+
+    if not creds:
         json_file = "service_account.json"
         if os.path.exists(json_file):
             creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
-        else:
-            return None
+
+    if not creds:
+        return None
+
     client = gspread.authorize(creds)
     try:
         sheet = client.open_by_url(SHEET_URL)
@@ -247,7 +280,6 @@ def run_selenium_and_extract(target_url):
         return None, f"Error: {str(e)}"
 
 
-# ★チャット用
 def fetch_bank_data_dynamic(bank_name):
     found_url, snippet = search_new_url_with_snippet(bank_name)
     if not found_url:
@@ -288,7 +320,6 @@ def fetch_bank_data_dynamic(bank_name):
     return None, "失敗"
 
 
-# ★管理画面用（URL優先更新）
 def update_bank_data_smart(bank_name, existing_url):
     target_url = existing_url
     if not target_url or pd.isna(target_url) or target_url == "":
