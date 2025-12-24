@@ -183,15 +183,10 @@ def search_new_url_with_snippet(bank_name):
 
 
 def ask_gemini_to_extract_7points(text_data, is_html=True):
-    """
-    ★ここが最大の変更点★
-    行政書士業務に必要な7項目だけを厳密に抽出するプロンプト
-    """
     data_type = "HTML" if is_html else "テキスト"
     prompt = f"""
     あなたは行政書士の実務アシスタントです。
     以下の{data_type}から、相続手続きに関する**「実務で必要な具体的情報」**のみを抽出してください。
-    
     必ず以下のJSON形式で出力してください。情報がない場合は「記載なし」としてください。
     
     {{
@@ -204,7 +199,6 @@ def ask_gemini_to_extract_7points(text_data, is_html=True):
         "safe_deposit": "貸金庫の手続き（開扉・解約など）",
         "summary": "上記以外の重要な注意点（Web予約必須など）"
     }}
-
     --- 対象データ ---
     {text_data[:30000]} 
     """
@@ -259,8 +253,6 @@ def run_selenium_and_extract(target_url):
             return None, "Access Error"
 
         driver.quit()
-
-        # 7項目抽出プロンプトを使用
         json_text = ask_gemini_to_extract_7points(body_text, is_html=True)
         return json_text, "Success"
 
@@ -274,7 +266,6 @@ def process_single_bank(bank_name, current_url):
         if bank_name in BANK_MASTER_DB:
             target_url = BANK_MASTER_DB[bank_name]
 
-    # 1. アクセス試行
     if target_url:
         st.write(f"   Trying: {target_url}")
         res_json, status = run_selenium_and_extract(target_url)
@@ -282,7 +273,6 @@ def process_single_bank(bank_name, current_url):
         if status == "Success" and data:
             return res_json, "Success", target_url
 
-    # 2. 失敗時: 検索スニペット活用
     st.write("   ⚠️ サイト不可。検索スニペットから抽出...")
     found_url, snippet_text = search_new_url_with_snippet(bank_name)
     if not snippet_text:
@@ -318,41 +308,60 @@ df, _ = get_google_sheet_data_cached()
 worksheet = get_worksheet_object()
 
 # ------------------------------------------------------------
-# PAGE 1: AIアシスタント (高速回答版)
+# PAGE 1: AIアシスタント (あいまい検索・候補選択版)
 # ------------------------------------------------------------
 if page == "🤖 AIアシスタント (実務用)":
     st.title("🤖 銀行手続 AIコンシェルジュ")
-    st.info(
-        "特定の銀行名を入力してください。事前に調査した「7つの重要項目」を即座に表示します。"
-    )
+    st.info("「ufj」「みずほ」のように短く入力してもOKです。")
     focus_chat_input()
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+    # チャット履歴表示
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if prompt := st.chat_input("（例）三菱UFJ銀行の手続き"):
+    # ユーザー入力
+    if prompt := st.chat_input("例: ufj、ゆうちょ"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            # ★ここが高速化の肝：AIに考えさせず、整形済みデータをそのまま出す
-            found_bank_data = None
-            bank_name_hit = ""
+            found_candidates = []
+
+            # 検索ロジック (1): 登録名がプロンプトに含まれる場合 (例: "三菱UFJ銀行の手続き" -> "三菱UFJ銀行")
+            # 検索ロジック (2): プロンプトが登録名に含まれる場合 (例: "ufj" -> "三菱UFJ銀行")
+            # 検索ロジック (3): 余計な言葉("手続き"等)を除外して検索
+
+            search_key = (
+                prompt.replace("手続き", "")
+                .replace("教えて", "")
+                .replace("銀行", "")
+                .strip()
+            )
 
             if df is not None:
-                for bank in df["金融機関名"].tolist():
-                    if bank in prompt:
-                        found_bank_data = df[df["金融機関名"] == bank].iloc[0]
-                        bank_name_hit = bank
-                        break
+                bank_list = df["金融機関名"].tolist()
+                for bank in bank_list:
+                    # 完全一致 or 包含関係のチェック (大文字小文字区別なし)
+                    if (bank in prompt) or (
+                        len(search_key) > 1 and search_key.lower() in bank.lower()
+                    ):
+                        found_candidates.append(bank)
 
-            if found_bank_data is not None:
-                # データを整形して表示（AI生成を待たずに即表示に近い速度）
+            # 重複除去
+            found_candidates = list(set(found_candidates))
+
+            # --- 分岐処理 ---
+
+            # パターンA: 候補が1つだけ見つかった場合 -> 即回答
+            if len(found_candidates) == 1:
+                bank_name_hit = found_candidates[0]
+                found_bank_data = df[df["金融機関名"] == bank_name_hit].iloc[0]
+
                 response_text = f"""
 ### 【{bank_name_hit}】 相続手続き情報
 *(最終確認: {found_bank_data.get("最終更新", "-")})*
@@ -361,7 +370,7 @@ if page == "🤖 AIアシスタント (実務用)":
 {found_bank_data.get("電話番号", "記載なし")}
 
 **2. 🧊 凍結連絡**
-{found_bank_data.get("凍結方法", "詳細欄を確認してください")}
+{found_bank_data.get("凍結方法", "記載なし")}
 
 **3. 📄 残高証明書**
 {found_bank_data.get("残高証明", "記載なし")}
@@ -389,16 +398,44 @@ if page == "🤖 AIアシスタント (実務用)":
                         found_bank_data["WebサイトURL"],
                     )
 
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": response_text}
+                )
+
+            # パターンB: 候補が複数見つかった場合 -> ボタンで選ばせる
+            elif len(found_candidates) > 1:
+                st.markdown(
+                    f"**「{search_key}」** に一致する銀行が複数見つかりました。どちらですか？"
+                )
+
+                # ボタンを並べる
+                cols = st.columns(min(len(found_candidates), 3))  # 最大3列で表示
+                for idx, candidate in enumerate(found_candidates):
+                    # ボタンが押されたら、その銀行名で再検索させるような挙動にする
+                    if cols[idx % 3].button(candidate, key=f"btn_{candidate}"):
+                        # ユーザーがその銀行名を発言したことにする（履歴に追加）
+                        st.session_state.messages.append(
+                            {"role": "user", "content": candidate}
+                        )
+                        st.rerun()  # 画面をリロードして、パターンAのロジックを通す
+
+                # 履歴には「候補を提示しました」と残す
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "複数の候補が見つかりました。ボタンから選択してください。",
+                    }
+                )
+
+            # パターンC: 見つからなかった場合 -> 一般AI回答
             else:
-                # データがない場合のみAIに考えさせる
                 with st.spinner("データ未登録のため、一般的な知識で回答します..."):
                     fallback_prompt = f"行政書士として、{prompt} に関する一般的な相続手続きの流れを簡潔に教えてください。"
                     response_text = generate_ultimate_rotation(fallback_prompt)
                     st.markdown(response_text)
-
-        st.session_state.messages.append(
-            {"role": "assistant", "content": response_text}
-        )
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": response_text}
+                    )
 
 # ------------------------------------------------------------
 # PAGE 2: マスタ管理
@@ -406,7 +443,6 @@ if page == "🤖 AIアシスタント (実務用)":
 elif page == "📝 マスタ管理・更新 (管理者用)":
     st.title("📝 銀行マスタ管理画面")
 
-    # カラム定義（7項目用）
     COLS = [
         "金融機関名",
         "WebサイトURL",
@@ -416,13 +452,12 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
         "取引明細",
         "解約手続",
         "投信国債",
-        "貸金庫",  # 新設カラム
+        "貸金庫",
         "AI要約",
         "最終更新",
     ]
 
     if df is not None and (df.empty or "凍結方法" not in df.columns):
-        # カラム構造が変わったので再構築
         bank_names = list(BANK_MASTER_DB.keys())
         init_urls = [BANK_MASTER_DB[name] for name in bank_names]
         df = pd.DataFrame(columns=COLS)
@@ -432,7 +467,7 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
         if worksheet:
             save_to_google_sheet(worksheet, df)
             st.cache_data.clear()
-            st.warning("データベース構造を「7項目特化型」にアップグレードしました。")
+            st.warning("DB構造更新完了")
             time.sleep(1)
             st.rerun()
 
@@ -451,15 +486,12 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                         bank = row["金融機関名"]
                         url = row["WebサイトURL"]
                         status.text(f"調査中: {bank}")
-
                         res_json, stat, final_url = process_single_bank(bank, url)
                         if final_url:
                             df.at[i, "WebサイトURL"] = final_url
-
                         if res_json:
                             d = extract_json_from_text(res_json)
                             if d:
-                                # 7項目を各列に保存
                                 df.at[i, "電話番号"] = d.get("contact_phone", "")
                                 df.at[i, "凍結方法"] = d.get("freeze_method", "")
                                 df.at[i, "残高証明"] = d.get("balance_cert", "")
@@ -470,13 +502,11 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                                 df.at[i, "AI要約"] = d.get("summary", "")
                             else:
                                 df.at[i, "AI要約"] = "解析エラー"
-
                         import datetime
 
                         df.at[i, "最終更新"] = datetime.datetime.now().strftime(
                             "%Y-%m-%d %H:%M"
                         )
-
                         if (i + 1) % 3 == 0 or (i + 1) == total:
                             save_to_google_sheet(worksheet, df)
                             status.text("Saving...")
@@ -489,7 +519,6 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
 
         with col2:
             if st.button("⚠️ リスト初期化"):
-                # 初期化処理（省略せず実装）
                 bank_names = list(BANK_MASTER_DB.keys())
                 init_urls = [BANK_MASTER_DB[name] for name in bank_names]
                 df = pd.DataFrame(columns=COLS)
