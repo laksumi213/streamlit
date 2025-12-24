@@ -10,6 +10,9 @@ import google.generativeai as genai
 import gspread
 import pandas as pd
 import streamlit as st
+
+# --- JavaScript実行用ライブラリ ---
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from duckduckgo_search import DDGS
 from google.api_core import exceptions
@@ -241,13 +244,30 @@ def process_single_bank(bank_name, target_url):
         return None, f"Error: {str(e)}", target_url
 
 
+# --- 便利なJS機能: チャット入力欄にフォーカスを当てる ---
+def focus_chat_input():
+    # JavaScriptを注入して、stChatInputTextAreaを探してフォーカスする
+    js = """
+    <script>
+        function setFocus() {
+            const doc = window.parent.document;
+            const textareas = doc.querySelectorAll('textarea[data-testid="stChatInputTextArea"]');
+            if (textareas.length > 0) {
+                textareas[0].focus();
+            }
+        }
+        // 画面描画を少し待ってから実行
+        setTimeout(setFocus, 300);
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
+
 # ============================================================
 # ★ アプリケーション本体 (Page構成)
 # ============================================================
 
 st.set_page_config(page_title="銀行手続システム", layout="wide")
-
-# パスワード認証が必要な場合はここに記述
 
 # サイドバーでページ切り替え
 page = st.sidebar.radio(
@@ -266,6 +286,9 @@ if page == "🤖 AIアシスタント (実務用)":
     st.info(
         "「三菱UFJの手続きはどうすればいい？」「〇〇銀行に電話する時の台本を作って」などと話しかけてください。"
     )
+
+    # ★ここでフォーカスを強制設定
+    focus_chat_input()
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -422,41 +445,32 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                     time.sleep(1)
                     st.rerun()
 
-    # --- ★ここが「案3：詳細ビュー」の実装部分 ---
+    # 詳細ビューエリア
     st.markdown("---")
     st.subheader("🔍 データベース閲覧")
 
     if df is not None:
-        # 1. 見やすい一覧表（クリック選択用）
         st.info("👇 行をクリックすると、下に詳細が表示されます。")
-
         cfg_view = {
             "WebサイトURL": st.column_config.LinkColumn("URL", display_text="Link"),
-            "AI要約": st.column_config.TextColumn(
-                "AI要約", width="medium"
-            ),  # 一覧では少し切れてもOK
+            "AI要約": st.column_config.TextColumn("AI要約", width="medium"),
         }
-
-        # selection_mode="single-row" で行選択を有効化
         event = st.dataframe(
             df,
             column_config=cfg_view,
             use_container_width=True,
             height=300,
-            on_select="rerun",  # 選択したら即再実行して詳細を表示
+            on_select="rerun",
             selection_mode="single-row",
             hide_index=True,
         )
 
-        # 2. 詳細表示エリア（選択されたら表示）
         if len(event.selection.rows) > 0:
             selected_index = event.selection.rows[0]
             selected_row = df.iloc[selected_index]
 
             st.markdown(f"### 🏦 {selected_row['金融機関名']} の詳細情報")
-
             with st.container(border=True):
-                # 2カラムレイアウトで見やすく
                 c1, c2 = st.columns(2)
                 with c1:
                     st.text_input(
@@ -473,36 +487,28 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                         disabled=True,
                     )
 
-                # AI要約は全文しっかり見せる
                 st.text_area(
                     "🤖 AIによる要約・注意点",
                     value=selected_row["AI要約"],
                     height=200,
                     disabled=True,
                 )
-
-                # リンクボタン
                 if selected_row["WebサイトURL"]:
                     st.link_button("👉 Webサイトを開く", selected_row["WebサイトURL"])
-
         else:
             st.caption("（上の表から銀行を選択してください）")
 
-        # 3. 編集・保存エリア（必要な時だけ開く）
         st.markdown("<br>", unsafe_allow_html=True)
         with st.expander("🛠️ データを手動で修正・保存する"):
             st.markdown(
                 "データを修正したい場合は、以下の表を直接編集して「保存」を押してください。"
             )
-
-            # 編集用のデータエディタ
             edited_df = st.data_editor(
                 df,
                 column_config={"WebサイトURL": st.column_config.LinkColumn("URL")},
                 num_rows="dynamic",
                 key="editor",
             )
-
             if st.button("💾 手動変更を保存"):
                 if worksheet:
                     save_to_google_sheet(worksheet, edited_df)
