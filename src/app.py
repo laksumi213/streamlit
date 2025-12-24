@@ -1,5 +1,6 @@
 import json
 import os
+import re  # 正規表現用（追加）
 import time
 
 import google.generativeai as genai
@@ -24,7 +25,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ★設定エリア
 # ============================================================
 
-# APIキーの読み込み (Streamlit CloudのSecrets または .env)
 if "GOOGLE_API_KEYS" in st.secrets:
     env_keys = st.secrets["GOOGLE_API_KEYS"]
 else:
@@ -82,7 +82,6 @@ if "SHEET_URL" in st.secrets:
 
 
 def get_google_sheet_data():
-    """Googleスプレッドシートに接続してDFを返す"""
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -117,7 +116,6 @@ def get_google_sheet_data():
 
 
 def save_to_google_sheet(worksheet, df):
-    """データフレームをスプレッドシートに保存"""
     worksheet.clear()
     set_with_dataframe(worksheet, df)
 
@@ -129,7 +127,6 @@ def save_to_google_sheet(worksheet, df):
 st.set_page_config(page_title="銀行マスタ管理 Cloud", layout="wide")
 st.title("🏦 銀行手続き完全自動化システム (Cloud版)")
 
-# --- 銀行リストの定義 ---
 FULL_BANK_LIST = [
     "三菱UFJ銀行",
     "三井住友銀行",
@@ -166,6 +163,8 @@ def find_bank_url(bank_name):
 def ask_gemini_to_extract(html_text):
     prompt = f"""
     以下のHTMLから銀行情報を抽出し、必ず以下のJSON形式のみを出力してください。
+    余計なMarkdown装飾や挨拶は一切不要です。
+    
     {{
         "phone": "電話番号", "hours": "受付時間",
         "method": "手続き方法", "summary": "要約"
@@ -206,11 +205,27 @@ def process_single_bank(bank_name, target_url):
         return None, f"Error: {str(e)}", target_url
 
 
+# --- ヘルパー関数: JSON抽出の強化版 ---
+def extract_json_from_text(text):
+    """
+    AIの返答からJSON部分（{...}）だけを無理やり抜き出す
+    """
+    try:
+        # 最初の "{" から 最後の "}" までを探す
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            json_str = match.group(0)
+            return json.loads(json_str)
+        else:
+            return None
+    except:
+        return None
+
+
 # --- メイン処理 ---
 
 df, worksheet = get_google_sheet_data()
 
-# 初回起動などでシートが空の場合の初期化
 if df is not None and df.empty:
     df = pd.DataFrame(
         {
@@ -226,7 +241,6 @@ if df is not None and df.empty:
     save_to_google_sheet(worksheet, df)
     st.rerun()
 
-# UI: 自動収集
 st.markdown("### 🚀 一括自動収集")
 col1, col2 = st.columns([2, 1])
 
@@ -243,33 +257,40 @@ with col1:
 
                 status_text.text(f"処理中: {bank} ...")
 
-                res_json, status, final_url = process_single_bank(bank, url)
+                res_json_text, status, final_url = process_single_bank(bank, url)
 
+                # URL更新
                 if final_url:
                     df.at[i, "WebサイトURL"] = final_url
-                if status == "Success" and res_json:
-                    try:
-                        cleaned = (
-                            res_json.replace("```json", "").replace("```", "").strip()
-                        )
-                        data = json.loads(cleaned)
-                        df.at[i, "電話番号"] = data.get("phone", "")
-                        df.at[i, "受付時間"] = data.get("hours", "")
-                        df.at[i, "手続き方法"] = data.get("method", "")
-                        df.at[i, "AI要約"] = data.get("summary", "")
-                        import datetime
 
-                        df.at[i, "最終更新"] = datetime.datetime.now().strftime(
-                            "%Y-%m-%d %H:%M"
-                        )
-                    except:
-                        pass
+                # データ更新処理
+                if status == "Success" and res_json_text:
+                    # ★強力なJSON抽出を使用
+                    data = extract_json_from_text(res_json_text)
 
+                    if data:
+                        df.at[i, "電話番号"] = data.get("phone", "不明")
+                        df.at[i, "受付時間"] = data.get("hours", "不明")
+                        df.at[i, "手続き方法"] = data.get("method", "不明")
+                        df.at[i, "AI要約"] = data.get("summary", "抽出成功")
+                    else:
+                        # 失敗したら生テキストを入れる（デバッグ用）
+                        df.at[i, "AI要約"] = f"解析失敗: {res_json_text[:50]}..."
+
+                # 日時更新
+                import datetime
+
+                df.at[i, "最終更新"] = datetime.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+
+                # 1行ごとに保存
                 save_to_google_sheet(worksheet, df)
                 bar.progress((i + 1) / total)
 
-            status_text.text("完了！")
-            st.success("全てのデータを更新しました！")
+            status_text.success("完了！画面を更新します...")
+            time.sleep(1)
+            st.rerun()  # ★ここで強制的に再読み込み
 
 with col2:
     if st.button("⚠️ 銀行リストを初期化・再読込"):
@@ -289,7 +310,6 @@ with col2:
         time.sleep(1)
         st.rerun()
 
-# UI: データ確認
 st.markdown("---")
 if df is not None:
     column_config = {
