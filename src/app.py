@@ -220,17 +220,19 @@ if df is not None and df.empty:
         "みずほ信託銀行",
     ]
     if df is not None and df.empty:
-    df = pd.DataFrame({
-        "金融機関名": FULL_BANK_LIST,
-        "WebサイトURL": [""] * len(FULL_BANK_LIST),
-        "電話番号": [""] * len(FULL_BANK_LIST),
-        "受付時間": [""] * len(FULL_BANK_LIST),
-        "手続き方法": [""] * len(FULL_BANK_LIST),
-        "AI要約": ["未取得"] * len(FULL_BANK_LIST),
-        "最終更新": ["-"] * len(FULL_BANK_LIST)
-    })
-    save_to_google_sheet(worksheet, df)
-    st.experimental_rerun()
+        df = pd.DataFrame(
+            {
+                "金融機関名": FULL_BANK_LIST,
+                "WebサイトURL": [""] * len(FULL_BANK_LIST),
+                "電話番号": [""] * len(FULL_BANK_LIST),
+                "受付時間": [""] * len(FULL_BANK_LIST),
+                "手続き方法": [""] * len(FULL_BANK_LIST),
+                "AI要約": ["未取得"] * len(FULL_BANK_LIST),
+                "最終更新": ["-"] * len(FULL_BANK_LIST),
+            }
+        )
+        save_to_google_sheet(worksheet, df)
+        st.experimental_rerun()
 
 # UI: 自動収集エリア
 st.markdown("### 🚀 一括自動収集")
@@ -242,32 +244,39 @@ with col1:
             total = len(df)
             bar = st.progress(0)
             status_text = st.empty()
-            
+
             for i, row in df.iterrows():
-                bank = row['金融機関名']
-                url = row['WebサイトURL'] if 'WebサイトURL' in df.columns else ""
-                
+                bank = row["金融機関名"]
+                url = row["WebサイトURL"] if "WebサイトURL" in df.columns else ""
+
                 status_text.text(f"処理中: {bank} ...")
-                
+
                 res_json, status, final_url = process_single_bank(bank, url)
-                
-                if final_url: df.at[i, 'WebサイトURL'] = final_url
+
+                if final_url:
+                    df.at[i, "WebサイトURL"] = final_url
                 if status == "Success" and res_json:
                     try:
-                        cleaned = res_json.replace("```json", "").replace("```", "").strip()
+                        cleaned = (
+                            res_json.replace("```json", "").replace("```", "").strip()
+                        )
                         data = json.loads(cleaned)
-                        df.at[i, '電話番号'] = data.get("phone", "")
-                        df.at[i, '受付時間'] = data.get("hours", "")
-                        df.at[i, '手続き方法'] = data.get("method", "")
-                        df.at[i, 'AI要約'] = data.get("summary", "")
+                        df.at[i, "電話番号"] = data.get("phone", "")
+                        df.at[i, "受付時間"] = data.get("hours", "")
+                        df.at[i, "手続き方法"] = data.get("method", "")
+                        df.at[i, "AI要約"] = data.get("summary", "")
                         import datetime
-                        df.at[i, '最終更新'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                    except: pass
-                
+
+                        df.at[i, "最終更新"] = datetime.datetime.now().strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                    except:
+                        pass
+
                 # 1行ごとに保存
                 save_to_google_sheet(worksheet, df)
                 bar.progress((i + 1) / total)
-            
+
             status_text.text("完了！")
             st.success("全てのデータを更新しました！")
 
@@ -275,15 +284,17 @@ with col1:
 with col2:
     if st.button("⚠️ 銀行リストを初期化・再読込"):
         # スプレッドシートを強制的にFULL_BANK_LISTで上書きする
-        new_df = pd.DataFrame({
-            "金融機関名": FULL_BANK_LIST,
-            "WebサイトURL": [""] * len(FULL_BANK_LIST),
-            "電話番号": [""] * len(FULL_BANK_LIST),
-            "受付時間": [""] * len(FULL_BANK_LIST),
-            "手続き方法": [""] * len(FULL_BANK_LIST),
-            "AI要約": ["未取得"] * len(FULL_BANK_LIST),
-            "最終更新": ["-"] * len(FULL_BANK_LIST)
-        })
+        new_df = pd.DataFrame(
+            {
+                "金融機関名": FULL_BANK_LIST,
+                "WebサイトURL": [""] * len(FULL_BANK_LIST),
+                "電話番号": [""] * len(FULL_BANK_LIST),
+                "受付時間": [""] * len(FULL_BANK_LIST),
+                "手続き方法": [""] * len(FULL_BANK_LIST),
+                "AI要約": ["未取得"] * len(FULL_BANK_LIST),
+                "最終更新": ["-"] * len(FULL_BANK_LIST),
+            }
+        )
         save_to_google_sheet(worksheet, new_df)
         st.warning("リストを初期化しました。ページをリロードします。")
         time.sleep(1)
@@ -295,7 +306,9 @@ if df is not None:
     column_config = {
         "WebサイトURL": st.column_config.LinkColumn("URL", display_text="開く")
     }
-    edited_df = st.data_editor(df, column_config=column_config, num_rows="dynamic", use_container_width=True)
+    edited_df = st.data_editor(
+        df, column_config=column_config, num_rows="dynamic", use_container_width=True
+    )
 
     if st.button("手動変更を保存"):
         save_to_google_sheet(worksheet, edited_df)
