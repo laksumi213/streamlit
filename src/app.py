@@ -247,8 +247,7 @@ def process_single_bank(bank_name, target_url):
 
 st.set_page_config(page_title="銀行手続システム", layout="wide")
 
-# パスワード認証（必要な場合）
-# def check_password(): ... (省略)
+# パスワード認証が必要な場合はここに記述
 
 # サイドバーでページ切り替え
 page = st.sidebar.radio(
@@ -271,12 +270,10 @@ if page == "🤖 AIアシスタント (実務用)":
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # チャット履歴の表示
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # ユーザー入力
     if prompt := st.chat_input("何でも聞いてください..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -284,14 +281,12 @@ if page == "🤖 AIアシスタント (実務用)":
 
         with st.chat_message("assistant"):
             with st.spinner("データベースを確認して回答を作成中..."):
-                # 1. ユーザーの質問に含まれる銀行名を探す
                 relevant_info = ""
                 found_bank = None
 
                 if df is not None:
                     for bank in df["金融機関名"].tolist():
                         if bank in prompt:
-                            # 該当する銀行のデータを取得
                             row = df[df["金融機関名"] == bank].iloc[0]
                             relevant_info = f"""
                             【{bank} の登録データ】
@@ -304,27 +299,21 @@ if page == "🤖 AIアシスタント (実務用)":
                             found_bank = bank
                             break
 
-                # 2. Geminiへのプロンプト作成
                 system_prompt = f"""
                 あなたは行政書士事務所の優秀なアシスタントAIです。
-                ユーザーは銀行の相続手続きを行おうとしています。
-                
                 以下の「データベース情報」をもとに、ユーザーの質問に具体的に答えてください。
-                もしデータベースに情報があれば、それを優先して回答してください。
                 電話をかけるシチュエーションなら、丁寧な「問い合わせ台本」を作成してください。
                 
                 --- データベース情報 ---
-                {relevant_info if relevant_info else "（該当する銀行データが見つかりませんでした。一般的な知識で回答してください。）"}
+                {relevant_info if relevant_info else "（該当データなし。一般知識で回答してください。）"}
                 
                 --- ユーザーの質問 ---
                 {prompt}
                 """
 
-                # 3. 回答生成
                 response_text = generate_ultimate_rotation(system_prompt)
                 st.markdown(response_text)
 
-                # リンクボタンの表示（気が利く機能）
                 if found_bank and relevant_info:
                     row = df[df["金融機関名"] == found_bank].iloc[0]
                     if row["WebサイトURL"]:
@@ -342,7 +331,7 @@ if page == "🤖 AIアシスタント (実務用)":
 # ------------------------------------------------------------
 elif page == "📝 マスタ管理・更新 (管理者用)":
     st.title("📝 銀行マスタ管理画面")
-    st.warning("ここは情報の閲覧・修正・一括更新を行う画面です。")
+    st.markdown("ここで情報の閲覧・修正・一括更新を行います。")
 
     # 初期化ロジック
     if df is not None and df.empty:
@@ -366,6 +355,7 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
 
     # 自動収集エリア
     with st.expander("🚀 データ一括更新パネル（管理者のみ操作）"):
+        st.warning("⚠️ 全銀行の情報を更新するには時間がかかります。")
         col1, col2 = st.columns([2, 1])
         with col1:
             if st.button("全銀行更新 (Cloud)", type="primary"):
@@ -432,20 +422,91 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                     time.sleep(1)
                     st.rerun()
 
-    # データ編集エリア
+    # --- ★ここが「案3：詳細ビュー」の実装部分 ---
     st.markdown("---")
+    st.subheader("🔍 データベース閲覧")
+
     if df is not None:
-        cfg = {"WebサイトURL": st.column_config.LinkColumn("URL", display_text="開く")}
-        edited_df = st.data_editor(
+        # 1. 見やすい一覧表（クリック選択用）
+        st.info("👇 行をクリックすると、下に詳細が表示されます。")
+
+        cfg_view = {
+            "WebサイトURL": st.column_config.LinkColumn("URL", display_text="Link"),
+            "AI要約": st.column_config.TextColumn(
+                "AI要約", width="medium"
+            ),  # 一覧では少し切れてもOK
+        }
+
+        # selection_mode="single-row" で行選択を有効化
+        event = st.dataframe(
             df,
-            column_config=cfg,
-            num_rows="dynamic",
+            column_config=cfg_view,
             use_container_width=True,
-            height=600,
+            height=300,
+            on_select="rerun",  # 選択したら即再実行して詳細を表示
+            selection_mode="single-row",
+            hide_index=True,
         )
 
-        if st.button("手動変更を保存"):
-            if worksheet:
-                save_to_google_sheet(worksheet, edited_df)
-                st.cache_data.clear()
-                st.success("保存しました")
+        # 2. 詳細表示エリア（選択されたら表示）
+        if len(event.selection.rows) > 0:
+            selected_index = event.selection.rows[0]
+            selected_row = df.iloc[selected_index]
+
+            st.markdown(f"### 🏦 {selected_row['金融機関名']} の詳細情報")
+
+            with st.container(border=True):
+                # 2カラムレイアウトで見やすく
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.text_input(
+                        "📞 電話番号", value=selected_row["電話番号"], disabled=True
+                    )
+                    st.text_input(
+                        "⏰ 受付時間", value=selected_row["受付時間"], disabled=True
+                    )
+                with c2:
+                    st.text_area(
+                        "📝 手続き方法",
+                        value=selected_row["手続き方法"],
+                        height=108,
+                        disabled=True,
+                    )
+
+                # AI要約は全文しっかり見せる
+                st.text_area(
+                    "🤖 AIによる要約・注意点",
+                    value=selected_row["AI要約"],
+                    height=200,
+                    disabled=True,
+                )
+
+                # リンクボタン
+                if selected_row["WebサイトURL"]:
+                    st.link_button("👉 Webサイトを開く", selected_row["WebサイトURL"])
+
+        else:
+            st.caption("（上の表から銀行を選択してください）")
+
+        # 3. 編集・保存エリア（必要な時だけ開く）
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("🛠️ データを手動で修正・保存する"):
+            st.markdown(
+                "データを修正したい場合は、以下の表を直接編集して「保存」を押してください。"
+            )
+
+            # 編集用のデータエディタ
+            edited_df = st.data_editor(
+                df,
+                column_config={"WebサイトURL": st.column_config.LinkColumn("URL")},
+                num_rows="dynamic",
+                key="editor",
+            )
+
+            if st.button("💾 手動変更を保存"):
+                if worksheet:
+                    save_to_google_sheet(worksheet, edited_df)
+                    st.cache_data.clear()
+                    st.success("スプレッドシートに保存しました！")
+                    time.sleep(1)
+                    st.rerun()
