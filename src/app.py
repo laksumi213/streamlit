@@ -1,25 +1,19 @@
 import json
 import os
-import random  # ランダム処理用
+import random
 import re
 import shutil
 import time
 
 import google.generativeai as genai
-
-# --- Google Sheets ---
 import gspread
 import pandas as pd
 import streamlit as st
-
-# --- JavaScript実行用 ---
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from duckduckgo_search import DDGS
 from gspread_dataframe import set_with_dataframe
 from oauth2client.service_account import ServiceAccountCredentials
-
-# --- Selenium ---
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -41,7 +35,7 @@ else:
     API_KEYS = []
 
 MODEL_CANDIDATES = [
-    "models/gemini-2.0-flash-exp",  # 安定板に戻しておきます（2.5がエラーになる可能性考慮）
+    "models/gemini-2.0-flash-exp",
     "models/gemini-1.5-flash",
 ]
 current_key_index = 0
@@ -143,7 +137,7 @@ def save_to_google_sheet(worksheet, df):
 
 
 # ============================================================
-# ★ ステルススクレイピング & AI解析
+# ★ 7項目特化型スクレイピング & AI解析
 # ============================================================
 
 BANK_MASTER_DB = {
@@ -167,23 +161,17 @@ BANK_MASTER_DB = {
     "みずほ信託銀行": "https://www.mizuho-tb.co.jp/souzoku/tetsuzuki/",
 }
 
-# ユーザーエージェントの変装リスト
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
 ]
 
 
 def search_new_url_with_snippet(bank_name):
-    """URLだけでなく、検索結果の説明文(body)も取得する"""
     try:
         query = f"{bank_name} 相続手続き"
-        # max_results=3にして、情報を多く集める
         results = DDGS().text(query, max_results=3)
         if results:
-            # 1位のURLと、上位3件のテキストを結合したものを返す
             top_url = results[0]["href"]
             combined_snippet = "\n".join(
                 [f"- {r.get('title', '')}: {r.get('body', '')}" for r in results]
@@ -194,16 +182,29 @@ def search_new_url_with_snippet(bank_name):
     return None, None
 
 
-def ask_gemini_to_extract(text_data, is_html=True):
-    data_type = "HTML" if is_html else "検索結果のテキスト要約"
+def ask_gemini_to_extract_7points(text_data, is_html=True):
+    """
+    ★ここが最大の変更点★
+    行政書士業務に必要な7項目だけを厳密に抽出するプロンプト
+    """
+    data_type = "HTML" if is_html else "テキスト"
     prompt = f"""
-    以下の{data_type}から銀行の相続手続き情報を抽出してください。
-    もし情報が不足している場合は「不明」としてください。
-    必ず以下のJSON形式のみを出力してください。Markdown装飾は不要です。
+    あなたは行政書士の実務アシスタントです。
+    以下の{data_type}から、相続手続きに関する**「実務で必要な具体的情報」**のみを抽出してください。
+    
+    必ず以下のJSON形式で出力してください。情報がない場合は「記載なし」としてください。
+    
     {{
-        "phone": "電話番号", "hours": "受付時間",
-        "method": "手続き方法", "summary": "要約(注意点など)"
+        "contact_phone": "相続専用ダイヤル・連絡先の電話番号",
+        "freeze_method": "凍結連絡の方法（電話/Web/来店など）",
+        "balance_cert": "残高証明書の申請方法・必要書類",
+        "transaction_history": "取引推移証明書（明細）の申請方法",
+        "cancellation": "解約（払戻）の手続き方法",
+        "investment": "投資信託・国債・公共債の手続き",
+        "safe_deposit": "貸金庫の手続き（開扉・解約など）",
+        "summary": "上記以外の重要な注意点（Web予約必須など）"
     }}
+
     --- 対象データ ---
     {text_data[:30000]} 
     """
@@ -221,8 +222,7 @@ def extract_json_from_text(text):
 
 
 def run_selenium_and_extract(target_url):
-    # ★対策: ランダムな待機時間（重要）
-    sleep_time = random.uniform(5, 10)
+    sleep_time = random.uniform(5, 8)
     time.sleep(sleep_time)
 
     options = Options()
@@ -230,15 +230,10 @@ def run_selenium_and_extract(target_url):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-
-    # ★対策: ロボットフラグの隠蔽
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-
-    # ★対策: ユーザーエージェントをランダムに変える
-    ua = random.choice(USER_AGENTS)
-    options.add_argument(f"--user-agent={ua}")
+    options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
 
     try:
         chromium_path = shutil.which("chromium")
@@ -250,32 +245,23 @@ def run_selenium_and_extract(target_url):
             service = Service(ChromeDriverManager().install())
 
         driver = webdriver.Chrome(service=service, options=options)
-
-        # ★対策: JavaScriptでwebdriverプロパティを消す
         driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
-
         driver.set_page_load_timeout(60)
-        driver.get(target_url)
-        time.sleep(5)  # ページ表示待ち
 
-        # 403 Forbiddenなどのチェック
-        page_title = driver.title
-        body_text = driver.find_element("tag name", "body").text
-
-        if (
-            "Access Denied" in body_text
-            or "403" in page_title
-            or "Forbidden" in body_text
-        ):
+        try:
+            driver.get(target_url)
+            time.sleep(5)
+            body_text = driver.find_element("tag name", "body").text
+        except:
             driver.quit()
-            return None, "Access Denied"
+            return None, "Access Error"
 
         driver.quit()
 
-        # 成功したらHTML解析
-        json_text = ask_gemini_to_extract(body_text, is_html=True)
+        # 7項目抽出プロンプトを使用
+        json_text = ask_gemini_to_extract_7points(body_text, is_html=True)
         return json_text, "Success"
 
     except Exception as e:
@@ -283,51 +269,39 @@ def run_selenium_and_extract(target_url):
 
 
 def process_single_bank(bank_name, current_url):
-    # 1. URL決定
     target_url = current_url
     if not target_url or pd.isna(target_url):
         if bank_name in BANK_MASTER_DB:
             target_url = BANK_MASTER_DB[bank_name]
 
-    # 2. アクセス試行
+    # 1. アクセス試行
     if target_url:
         st.write(f"   Trying: {target_url}")
         res_json, status = run_selenium_and_extract(target_url)
-
-        # 成功なら即リターン
         data = extract_json_from_text(res_json)
         if status == "Success" and data:
             return res_json, "Success", target_url
 
-    # 3. 失敗時: 検索スニペット活用（救済措置）
-    st.write("   ⚠️ サイトアクセス不可。検索結果から情報を推測します...")
-
+    # 2. 失敗時: 検索スニペット活用
+    st.write("   ⚠️ サイト不可。検索スニペットから抽出...")
     found_url, snippet_text = search_new_url_with_snippet(bank_name)
-
     if not snippet_text:
         return None, "完全失敗", target_url
 
-    # URLだけでも更新しておく
     final_url = found_url if found_url else target_url
-
-    # スニペットをAIに読ませる
-    st.write("   🔍 検索情報の解析中...")
-    res_json = ask_gemini_to_extract(snippet_text, is_html=False)
-
+    res_json = ask_gemini_to_extract_7points(snippet_text, is_html=False)
     return res_json, "SnippetFallback", final_url
 
 
 def focus_chat_input():
-    js = """
-    <script>
-        function setFocus() {
-            const doc = window.parent.document;
-            const textareas = doc.querySelectorAll('textarea[data-testid="stChatInputTextArea"]');
-            if (textareas.length > 0) { textareas[0].focus(); }
-        }
-        setTimeout(setFocus, 300);
-    </script>
-    """
+    js = """<script>
+    function setFocus() {
+        const doc = window.parent.document;
+        const textareas = doc.querySelectorAll('textarea[data-testid="stChatInputTextArea"]');
+        if (textareas.length > 0) { textareas[0].focus(); }
+    }
+    setTimeout(setFocus, 300);
+    </script>"""
     components.html(js, height=0, width=0)
 
 
@@ -336,7 +310,6 @@ def focus_chat_input():
 # ============================================================
 
 st.set_page_config(page_title="銀行手続システム", layout="wide")
-
 page = st.sidebar.radio(
     "メニュー選択", ["🤖 AIアシスタント (実務用)", "📝 マスタ管理・更新 (管理者用)"]
 )
@@ -344,10 +317,13 @@ page = st.sidebar.radio(
 df, _ = get_google_sheet_data_cached()
 worksheet = get_worksheet_object()
 
+# ------------------------------------------------------------
+# PAGE 1: AIアシスタント (高速回答版)
+# ------------------------------------------------------------
 if page == "🤖 AIアシスタント (実務用)":
     st.title("🤖 銀行手続 AIコンシェルジュ")
     st.info(
-        "「三菱UFJの手続きはどうすればいい？」「〇〇銀行に電話する時の台本を作って」などと話しかけてください。"
+        "特定の銀行名を入力してください。事前に調査した「7つの重要項目」を即座に表示します。"
     )
     focus_chat_input()
 
@@ -358,75 +334,111 @@ if page == "🤖 AIアシスタント (実務用)":
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if prompt := st.chat_input("何でも聞いてください..."):
+    if prompt := st.chat_input("（例）三菱UFJ銀行の手続き"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("データベースを確認して回答を作成中..."):
-                relevant_info = ""
-                found_bank = None
-                if df is not None:
-                    for bank in df["金融機関名"].tolist():
-                        if bank in prompt:
-                            row = df[df["金融機関名"] == bank].iloc[0]
-                            relevant_info = f"""
-                            【{bank} の登録データ】
-                            - 電話番号: {row["電話番号"]}
-                            - 受付時間: {row["受付時間"]}
-                            - 手続方法: {row["手続き方法"]}
-                            - AI要約: {row["AI要約"]}
-                            - Webサイト: {row["WebサイトURL"]}
-                            """
-                            found_bank = bank
-                            break
+            # ★ここが高速化の肝：AIに考えさせず、整形済みデータをそのまま出す
+            found_bank_data = None
+            bank_name_hit = ""
 
-                system_prompt = f"""
-                あなたは行政書士事務所の優秀なアシスタントAIです。
-                データベース情報をもとに回答してください。
-                --- データベース情報 ---
-                {relevant_info if relevant_info else "（該当データなし。一般知識で回答。）"}
-                --- 質問 ---
-                {prompt}
+            if df is not None:
+                for bank in df["金融機関名"].tolist():
+                    if bank in prompt:
+                        found_bank_data = df[df["金融機関名"] == bank].iloc[0]
+                        bank_name_hit = bank
+                        break
+
+            if found_bank_data is not None:
+                # データを整形して表示（AI生成を待たずに即表示に近い速度）
+                response_text = f"""
+### 【{bank_name_hit}】 相続手続き情報
+*(最終確認: {found_bank_data.get("最終更新", "-")})*
+
+**1. 📞 相続連絡先**
+{found_bank_data.get("電話番号", "記載なし")}
+
+**2. 🧊 凍結連絡**
+{found_bank_data.get("凍結方法", "詳細欄を確認してください")}
+
+**3. 📄 残高証明書**
+{found_bank_data.get("残高証明", "記載なし")}
+
+**4. 📊 取引明細**
+{found_bank_data.get("取引明細", "記載なし")}
+
+**5. 🚪 解約手続き**
+{found_bank_data.get("解約手続", "記載なし")}
+
+**6. 📈 投資信託・国債**
+{found_bank_data.get("投信国債", "記載なし")}
+
+**7. 🔐 貸金庫**
+{found_bank_data.get("貸金庫", "記載なし")}
+
+---
+**💡 その他・要約**
+{found_bank_data.get("AI要約", "なし")}
                 """
-                response_text = generate_ultimate_rotation(system_prompt)
                 st.markdown(response_text)
-                if found_bank and relevant_info:
-                    row = df[df["金融機関名"] == found_bank].iloc[0]
-                    if row["WebサイトURL"]:
-                        st.link_button(
-                            f"🔗 {found_bank}のWebサイトを開く", row["WebサイトURL"]
-                        )
+                if found_bank_data["WebサイトURL"]:
+                    st.link_button(
+                        f"🔗 {bank_name_hit} 公式サイトへ",
+                        found_bank_data["WebサイトURL"],
+                    )
+
+            else:
+                # データがない場合のみAIに考えさせる
+                with st.spinner("データ未登録のため、一般的な知識で回答します..."):
+                    fallback_prompt = f"行政書士として、{prompt} に関する一般的な相続手続きの流れを簡潔に教えてください。"
+                    response_text = generate_ultimate_rotation(fallback_prompt)
+                    st.markdown(response_text)
+
         st.session_state.messages.append(
             {"role": "assistant", "content": response_text}
         )
 
+# ------------------------------------------------------------
+# PAGE 2: マスタ管理
+# ------------------------------------------------------------
 elif page == "📝 マスタ管理・更新 (管理者用)":
     st.title("📝 銀行マスタ管理画面")
 
-    if df is not None and df.empty:
+    # カラム定義（7項目用）
+    COLS = [
+        "金融機関名",
+        "WebサイトURL",
+        "電話番号",
+        "凍結方法",
+        "残高証明",
+        "取引明細",
+        "解約手続",
+        "投信国債",
+        "貸金庫",  # 新設カラム
+        "AI要約",
+        "最終更新",
+    ]
+
+    if df is not None and (df.empty or "凍結方法" not in df.columns):
+        # カラム構造が変わったので再構築
         bank_names = list(BANK_MASTER_DB.keys())
         init_urls = [BANK_MASTER_DB[name] for name in bank_names]
-        df = pd.DataFrame(
-            {
-                "金融機関名": bank_names,
-                "WebサイトURL": init_urls,
-                "電話番号": [""] * len(bank_names),
-                "受付時間": [""] * len(bank_names),
-                "手続き方法": [""] * len(bank_names),
-                "AI要約": ["未取得"] * len(bank_names),
-                "最終更新": ["-"] * len(bank_names),
-            }
-        )
+        df = pd.DataFrame(columns=COLS)
+        df["金融機関名"] = bank_names
+        df["WebサイトURL"] = init_urls
+        df = df.fillna("")
         if worksheet:
             save_to_google_sheet(worksheet, df)
             st.cache_data.clear()
+            st.warning("データベース構造を「7項目特化型」にアップグレードしました。")
+            time.sleep(1)
             st.rerun()
 
     with st.expander("🚀 データ一括更新パネル（管理者のみ操作）"):
-        st.warning(
-            "⚠️ ステルスモードで実行中。ランダムな待機時間が入るため、通常より時間がかかります。"
+        st.info(
+            "💡 7項目（凍結・残高・明細・解約・投信・貸金庫・電話）を重点的に抽出します。"
         )
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -437,10 +449,8 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                     status = st.empty()
                     for i, row in df.iterrows():
                         bank = row["金融機関名"]
-                        url = (
-                            row["WebサイトURL"] if "WebサイトURL" in df.columns else ""
-                        )
-                        status.text(f"処理中: {bank}")
+                        url = row["WebサイトURL"]
+                        status.text(f"調査中: {bank}")
 
                         res_json, stat, final_url = process_single_bank(bank, url)
                         if final_url:
@@ -449,20 +459,17 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                         if res_json:
                             d = extract_json_from_text(res_json)
                             if d:
-                                df.at[i, "電話番号"] = d.get("phone", "")
-                                df.at[i, "受付時間"] = d.get("hours", "")
-                                df.at[i, "手続き方法"] = d.get("method", "")
-                                if stat == "SnippetFallback":
-                                    df.at[i, "AI要約"] = (
-                                        "⚠️サイト不可のため検索結果から抽出: "
-                                        + d.get("summary", "")
-                                    )
-                                else:
-                                    df.at[i, "AI要約"] = d.get("summary", "")
+                                # 7項目を各列に保存
+                                df.at[i, "電話番号"] = d.get("contact_phone", "")
+                                df.at[i, "凍結方法"] = d.get("freeze_method", "")
+                                df.at[i, "残高証明"] = d.get("balance_cert", "")
+                                df.at[i, "取引明細"] = d.get("transaction_history", "")
+                                df.at[i, "解約手続"] = d.get("cancellation", "")
+                                df.at[i, "投信国債"] = d.get("investment", "")
+                                df.at[i, "貸金庫"] = d.get("safe_deposit", "")
+                                df.at[i, "AI要約"] = d.get("summary", "")
                             else:
-                                df.at[i, "AI要約"] = "Parse Error"
-                        else:
-                            df.at[i, "AI要約"] = f"Error: {stat}"
+                                df.at[i, "AI要約"] = "解析エラー"
 
                         import datetime
 
@@ -482,20 +489,15 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
 
         with col2:
             if st.button("⚠️ リスト初期化"):
-                names = list(BANK_MASTER_DB.keys())
-                new_df = pd.DataFrame(
-                    {
-                        "金融機関名": names,
-                        "WebサイトURL": [BANK_MASTER_DB[n] for n in names],
-                        "電話番号": [""] * len(names),
-                        "受付時間": [""] * len(names),
-                        "手続き方法": [""] * len(names),
-                        "AI要約": ["未取得"] * len(names),
-                        "最終更新": ["-"] * len(names),
-                    }
-                )
+                # 初期化処理（省略せず実装）
+                bank_names = list(BANK_MASTER_DB.keys())
+                init_urls = [BANK_MASTER_DB[name] for name in bank_names]
+                df = pd.DataFrame(columns=COLS)
+                df["金融機関名"] = bank_names
+                df["WebサイトURL"] = init_urls
+                df = df.fillna("")
                 if worksheet:
-                    save_to_google_sheet(worksheet, new_df)
+                    save_to_google_sheet(worksheet, df)
                     st.cache_data.clear()
                     st.warning("初期化しました")
                     time.sleep(1)
@@ -505,11 +507,11 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
     st.subheader("🔍 データベース閲覧")
 
     if df is not None:
-        st.info("👇 行をクリックすると、下に詳細が表示されます。")
         cfg_view = {
             "WebサイトURL": st.column_config.LinkColumn("URL", display_text="Link"),
-            "AI要約": st.column_config.TextColumn("AI要約", width="large"),
-            "手続き方法": st.column_config.TextColumn("手続き方法", width="medium"),
+            "電話番号": st.column_config.TextColumn("📞 電話", width="medium"),
+            "凍結方法": st.column_config.TextColumn("🧊 凍結", width="medium"),
+            "AI要約": st.column_config.TextColumn("要約", width="medium"),
         }
         event = st.dataframe(
             df,
@@ -522,53 +524,20 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
         )
 
         if len(event.selection.rows) > 0:
-            selected_index = event.selection.rows[0]
-            selected_row = df.iloc[selected_index]
-
-            st.markdown(f"### 🏦 {selected_row['金融機関名']} の詳細情報")
+            idx = event.selection.rows[0]
+            row = df.iloc[idx]
+            st.markdown(f"### 🏦 {row['金融機関名']} 詳細")
             with st.container(border=True):
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.text_input(
-                        "📞 電話番号", value=selected_row["電話番号"], disabled=True
-                    )
-                    st.text_input(
-                        "⏰ 受付時間", value=selected_row["受付時間"], disabled=True
-                    )
+                    st.info(f"**📞 連絡先**: {row['電話番号']}")
+                    st.write(f"**🧊 凍結連絡**: {row['凍結方法']}")
+                    st.write(f"**📄 残高証明**: {row['残高証明']}")
+                    st.write(f"**📊 取引明細**: {row['取引明細']}")
                 with c2:
-                    st.text_area(
-                        "📝 手続き方法",
-                        value=selected_row["手続き方法"],
-                        height=108,
-                        disabled=True,
-                    )
-
-                st.text_area(
-                    "🤖 AIによる要約・注意点",
-                    value=selected_row["AI要約"],
-                    height=200,
-                    disabled=True,
-                )
-                if selected_row["WebサイトURL"]:
-                    st.link_button("👉 Webサイトを開く", selected_row["WebサイトURL"])
-        else:
-            st.caption("（上の表から銀行を選択してください）")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        with st.expander("🛠️ データを手動で修正・保存する"):
-            st.markdown(
-                "データを修正したい場合は、以下の表を直接編集して「保存」を押してください。"
-            )
-            edited_df = st.data_editor(
-                df,
-                column_config={"WebサイトURL": st.column_config.LinkColumn("URL")},
-                num_rows="dynamic",
-                key="editor",
-            )
-            if st.button("💾 手動変更を保存"):
-                if worksheet:
-                    save_to_google_sheet(worksheet, edited_df)
-                    st.cache_data.clear()
-                    st.success("保存しました")
-                    time.sleep(1)
-                    st.rerun()
+                    st.write(f"**🚪 解約手続**: {row['解約手続']}")
+                    st.write(f"**📈 投信国債**: {row['投信国債']}")
+                    st.write(f"**🔐 貸金庫**: {row['貸金庫']}")
+                    st.warning(f"**💡 その他**: {row['AI要約']}")
+                if row["WebサイトURL"]:
+                    st.link_button("公式サイト", row["WebサイトURL"])
