@@ -319,8 +319,7 @@ if page == "🤖 AIアシスタント (実務用)":
     st.info(
         "「三菱UFJ」「みずほ銀行」など入力してください。なお、ufjなど部分的な言葉でもOKです。"
     )
-    # チャット入力欄へのフォーカス（お好みで有効化）
-    # focus_chat_input()
+    focus_chat_input()
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -329,9 +328,8 @@ if page == "🤖 AIアシスタント (実務用)":
     if "candidate_list" not in st.session_state:
         st.session_state.candidate_list = None
 
-    # --- 共通の処理関数 ---
-    def select_bank_and_show_menu(bank_name_arg):
-        # DBからデータを取得してセット
+    # --- 共通処理: 銀行確定後のデータセット ---
+    def set_bank_data_and_reset(bank_name_arg):
         if df is not None:
             found_row = df[df["金融機関名"] == bank_name_arg]
             if not found_row.empty:
@@ -345,10 +343,10 @@ if page == "🤖 AIアシスタント (実務用)":
                     }
                 )
                 return
-
-        # DBにない場合（検索ロジックへ流す、あるいはエラー）
+        # DBにない場合は調査ロジック（通常ここには来ないが念のため）
         handle_input(bank_name_arg)
 
+    # --- メイン入力処理 ---
     def handle_input(user_text):
         st.session_state.messages.append({"role": "user", "content": user_text})
 
@@ -376,7 +374,7 @@ if page == "🤖 AIアシスタント (実務用)":
                 found_candidates = list(set(found_candidates))
 
         if len(found_candidates) == 1:
-            select_bank_and_show_menu(found_candidates[0])
+            set_bank_data_and_reset(found_candidates[0])
 
         elif len(found_candidates) > 1:
             st.session_state.candidate_list = found_candidates
@@ -406,45 +404,33 @@ if page == "🤖 AIアシスタント (実務用)":
                 )
                 st.session_state.current_bank_data = None
 
-    # --- UI 1: 銀行フィルター＆一覧ボタン ---
-    st.write("▼ **登録済みの銀行から選ぶ**")
-    filter_text = st.text_input(
-        "🔍 銀行を絞り込む (例: ufj)", placeholder="名前を入力してEnter..."
-    )
-
-    # フィルタリング
-    visible_banks = []
-    if df is not None:
-        all_banks = df["金融機関名"].tolist()
-        if filter_text:
-            s_key = filter_text.strip().lower()
-            visible_banks = [b for b in all_banks if s_key in b.lower()]
+    # --- UI: 登録済み銀行の一覧 (クイック選択) ---
+    with st.expander("🏦 登録済みの銀行一覧を開く (クリックで選択)", expanded=True):
+        if df is not None and not df.empty:
+            all_banks = df["金融機関名"].tolist()
+            # 4列でボタン配置
+            cols = st.columns(4)
+            for idx, b_name in enumerate(all_banks):
+                if cols[idx % 4].button(
+                    b_name, key=f"quick_{idx}", use_container_width=True
+                ):
+                    # 履歴に残さず直接セットでも良いが、流れがわかるように履歴追加
+                    st.session_state.messages.append(
+                        {"role": "user", "content": f"{b_name} を選択"}
+                    )
+                    set_bank_data_and_reset(b_name)
+                    st.rerun()
         else:
-            visible_banks = all_banks
-
-    # ボタン一覧表示（グリッド）
-    if visible_banks:
-        # 4列で表示
-        cols = st.columns(4)
-        for idx, b_name in enumerate(visible_banks):
-            if cols[idx % 4].button(b_name, use_container_width=True):
-                # ボタンが押されたら選択処理へ
-                st.session_state.messages.append(
-                    {"role": "user", "content": f"{b_name} を選択"}
-                )
-                select_bank_and_show_menu(b_name)
-                st.rerun()
-    else:
-        st.caption("該当する銀行が登録されていません。下のチャットで検索してください。")
+            st.caption("登録データがありません。")
 
     st.markdown("---")
 
-    # --- UI 2: チャット履歴 ---
+    # --- UI: チャット履歴 ---
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # --- UI 3: 複数候補ボタン (検索結果) ---
+    # --- UI: 複数候補ボタン ---
     if st.session_state.candidate_list:
         st.markdown("##### 🔍 候補を選択してください")
         cands = st.session_state.candidate_list
@@ -453,10 +439,10 @@ if page == "🤖 AIアシスタント (実務用)":
             if c_cols[idx % 4].button(
                 cand, key=f"btn_cand_{cand}", use_container_width=True
             ):
-                select_bank_and_show_menu(cand)
+                handle_input(cand)
                 st.rerun()
 
-    # --- UI 4: 詳細7項目ボタン ---
+    # --- UI: 7項目詳細ボタン (データセット中のみ表示) ---
     if st.session_state.current_bank_data and not st.session_state.candidate_list:
         data = st.session_state.current_bank_data
         st.markdown("---")
@@ -465,6 +451,7 @@ if page == "🤖 AIアシスタント (実務用)":
         b1, b2, b3, b4 = st.columns(4)
         b5, b6, b7, b8 = st.columns(4)
 
+        # ボタン処理 (押したら履歴追加＆Rerun)
         if b1.button("📞 連絡先", use_container_width=True):
             st.session_state.messages.append(
                 {"role": "assistant", "content": f"**📞 連絡先**\n{data['電話番号']}"}
@@ -505,7 +492,7 @@ if page == "🤖 AIアシスタント (実務用)":
             st.session_state.messages.append({"role": "assistant", "content": full_msg})
             st.rerun()
 
-    # --- UI 5: チャット入力欄 ---
+    # --- UI: メイン入力欄 ---
     if prompt := st.chat_input("銀行名を入力 (Web検索する場合)..."):
         handle_input(prompt)
         st.rerun()
