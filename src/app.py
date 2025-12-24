@@ -306,19 +306,33 @@ def fetch_specific_detail(bank_name, topic):
         return f"調査中にエラーが発生しました: {str(e)}"
 
 
-# ★オートフォーカス用の新スクリプト (st.text_input対応版)
+# ★オートフォーカス用の新スクリプト
 def focus_search_input():
     js = """
     <script>
         function setFocus() {
             const doc = window.parent.document;
-            // 全てのinput[type=text]を取得し、最初の要素にフォーカス
             const inputs = doc.querySelectorAll('input[type="text"]');
-            if (inputs.length > 0) {
-                inputs[0].focus();
-            }
+            if (inputs.length > 0) { inputs[0].focus(); }
         }
         setTimeout(setFocus, 300);
+    </script>
+    """
+    components.html(js, height=0, width=0)
+
+
+# ★自動スクロール用の新スクリプト
+def scroll_to_results():
+    js = """
+    <script>
+        function scrollToResult() {
+            const doc = window.parent.document;
+            const element = doc.getElementById("result_anchor");
+            if (element) {
+                element.scrollIntoView({behavior: "smooth", block: "start"});
+            }
+        }
+        setTimeout(scrollToResult, 500);
     </script>
     """
     components.html(js, height=0, width=0)
@@ -416,13 +430,11 @@ if page == "🤖 AIアシスタント (実務用)":
         else:
             select_bank(user_text)
 
-    # --- UI: 検索バー (一本化) ---
+    # --- UI: 検索バー ---
     st.write("▼ **銀行を検索・選択**")
 
     # テキスト入力欄
     search_query = st.text_input("🔍 銀行名を入力 (Enterで検索)", key="main_search_bar")
-
-    # ★ここでフォーカスを強制適用
     focus_search_input()
 
     # 銀行一覧 (フィルタリング)
@@ -446,39 +458,27 @@ if page == "🤖 AIアシスタント (実務用)":
                     select_bank(b_name)
                     st.rerun()
 
-    # Enter検索処理 (リストにない場合など、入力欄の値で検索実行)
-    # ユーザーがテキストを入力してEnterした瞬間、search_queryに値が入るので、
-    # リストクリック以外で、かつまだ結果が出ていない場合に実行するロジック
-    # (ただしst.text_inputはEnterでリランするので、ここで単純に呼び出すと無限ループのリスクがある。
-    #  ボタンクリックと区別するため、session stateを使うのが定石だが、
-    #  今回は「ボタンを押さずにEnterした場合」を拾う簡易策として、
-    #  「現在選択中の銀行」と「入力値」が一致しない場合に検索させる)
-
     if search_query:
-        # 入力値があり、かつまだその銀行が選択状態になっていない(または候補選択中)なら実行
+        # 入力値があり、かつまだその銀行が選択状態になっていない場合のEnter検知用ロジック
         is_already_selected = False
         if st.session_state.current_bank_data:
             if st.session_state.current_bank_data["金融機関名"] == search_query:
                 is_already_selected = True
 
-        # 候補選択モードでもなく、選択済みでもない場合 -> 検索実行
+        # Enterで確定されたがボタンクリックではない場合
+        # ボタンクリック時は st.rerun() で抜けるのでここは通らないはず
         if not is_already_selected and not st.session_state.candidate_list:
-            # ただし、これが毎リランごとに走ると重いので、
-            # ユーザーが意図的に入力したとみなす
-            # UI的に「検索実行」ボタンを置くのが一番安全だが、Enter要望なので
-            # ここでhandle_inputを呼ぶ。
-            # ※ボタンクリック時はst.rerun()でここに来る前に処理が終わるはず
-            pass
+            # ここでリストにあるかチェック
+            if not visible_banks:
+                # リストにない場合のみ自動実行（リストにあるならボタンを押してほしいがEnterなら先頭を選択等の挙動もあり）
+                handle_input(search_query)
+                st.rerun()
 
-    # 補足: Enterキーだけで動作させるためのトリガーボタン (非表示にはできないが、UX向上のため配置)
     if search_query and not st.session_state.candidate_list:
-        # まだ詳細が出ていないなら検索ボタンを出す（Enterの代わり）
         if (
             not st.session_state.current_bank_data
             or st.session_state.current_bank_data["金融機関名"] != search_query
         ):
-            # 自動的に実行してしまうとループするので、「調査する」ボタンを出すか、
-            # あるいは visible_banks が 0 の時だけ自動実行するなど調整
             if not visible_banks:
                 handle_input(search_query)
                 st.rerun()
@@ -498,7 +498,13 @@ if page == "🤖 AIアシスタント (実務用)":
     st.markdown("---")
 
     # --- UI: 詳細パネル ---
+    # ★ここにスクロール用のアンカーを設置
+    st.markdown('<div id="result_anchor"></div>', unsafe_allow_html=True)
+
     if st.session_state.current_bank_data:
+        # ★データが表示されるとき、スクロールを実行
+        scroll_to_results()
+
         data = st.session_state.current_bank_data
         st.subheader(f"🏦 {data['金融機関名']}")
 
