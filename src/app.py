@@ -69,12 +69,11 @@ def generate_ultimate_rotation(prompt):
 
 
 # ============================================================
-# ★ Google Sheets
+# ★ Google Sheets & Data Logic
 # ============================================================
 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/xxxxxxxx/edit"
-if "SHEET_URL" in st.secrets:
-    SHEET_URL = st.secrets["SHEET_URL"]
+# ★ここを指定のURLに変更しました
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1kQJ7j6jgs0RqS1IRvrdyuNseZ9GKgov5YXiDq-vawCc/edit?gid=0#gid=0"
 
 
 @st.cache_data(ttl=60)
@@ -87,6 +86,7 @@ def get_google_sheet_data_cached():
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     else:
+        # ローカル実行時はこのファイルを探しに行きます
         json_file = "service_account.json"
         if os.path.exists(json_file):
             creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
@@ -247,7 +247,7 @@ def run_selenium_and_extract(target_url):
         return None, f"Error: {str(e)}"
 
 
-# ★チャット用（検索必須）
+# ★チャット用
 def fetch_bank_data_dynamic(bank_name):
     found_url, snippet = search_new_url_with_snippet(bank_name)
     if not found_url:
@@ -290,14 +290,10 @@ def fetch_bank_data_dynamic(bank_name):
 
 # ★管理画面用（URL優先更新）
 def update_bank_data_smart(bank_name, existing_url):
-    # 1. 既存URLがある場合はそれを優先（検索ブロック回避）
     target_url = existing_url
     if not target_url or pd.isna(target_url) or target_url == "":
-        # URLがなければマスタから補完
         if bank_name in BANK_MASTER_DB:
             target_url = BANK_MASTER_DB[bank_name]
-
-    # 2. URLがあればSelenium実行
     if target_url:
         st.write(f"   → サイト解析: {target_url}")
         res_json, status = run_selenium_and_extract(target_url)
@@ -316,8 +312,6 @@ def update_bank_data_smart(bank_name, existing_url):
                 "AI要約": data.get("summary", ""),
                 "最終更新": "一括更新",
             }, "Success"
-
-    # 3. URLがない、または失敗した場合は検索へ
     st.write("   → URL不明/失敗のため検索中...")
     return fetch_bank_data_dynamic(bank_name)
 
@@ -370,7 +364,7 @@ def scroll_to_results():
 # ★ App Main
 # ============================================================
 
-st.set_page_config(page_title="銀行手続システム", layout="wide")
+st.set_page_config(page_title="銀行手続システム(Local)", layout="wide")
 page = st.sidebar.radio(
     "メニュー選択", ["🤖 AIアシスタント (実務用)", "📝 マスタ管理・更新 (管理者用)"]
 )
@@ -379,10 +373,10 @@ df, _ = get_google_sheet_data_cached()
 worksheet = get_worksheet_object()
 
 # ------------------------------------------------------------
-# PAGE 1: AIアシスタント (ダッシュボード型)
+# PAGE 1: AIアシスタント (実務用)
 # ------------------------------------------------------------
 if page == "🤖 AIアシスタント (実務用)":
-    st.title("🤖 銀行手続 AIコンシェルジュ")
+    st.title("🤖 銀行手続 AIコンシェルジュ (Local)")
     st.info(
         "「三菱UFJ」「みずほ銀行」など入力してください。なお、ufjなど部分的な言葉でもOKです。"
     )
@@ -603,30 +597,23 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                 for i, row in df.iterrows():
                     bank = row["金融機関名"]
                     status.text(f"調査中: {bank} ...")
-
-                    # ★ここが重要：URLがある場合はそれを優先する「smart」関数を使用
                     res_data, stat = update_bank_data_smart(bank, row["WebサイトURL"])
-
                     if stat in ["Success", "Fallback"] and res_data:
                         for k in COLS:
                             if k in res_data:
                                 df.at[i, k] = res_data[k]
-
                     import datetime
 
                     df.at[i, "最終更新"] = datetime.datetime.now().strftime(
                         "%Y-%m-%d %H:%M"
                     )
-
                     if (i + 1) % 3 == 0:
                         save_to_google_sheet(worksheet, df)
                         time.sleep(1)
                     bar.progress((i + 1) / total)
-
                 save_to_google_sheet(worksheet, df)
                 status.success("完了！")
                 st.cache_data.clear()
-                time.sleep(1)
                 st.rerun()
 
     if df is not None:
