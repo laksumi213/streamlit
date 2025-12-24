@@ -20,7 +20,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ============================================================
-# ★設定エリア (.env参照に変更)
+# ★設定エリア
 # ============================================================
 
 # 1. .envファイルをロード
@@ -32,7 +32,6 @@ env_keys = os.getenv("GOOGLE_API_KEYS")
 if env_keys:
     API_KEYS = env_keys.split(",")
 else:
-    # キーがない場合は空リスト（後でエラー表示）
     API_KEYS = []
 
 MODEL_CANDIDATES = [
@@ -70,7 +69,7 @@ def generate_ultimate_rotation(prompt):
 
 
 # ============================================================
-# ★ Google Sheets & Data Logic (ローカルファイル参照)
+# ★ Google Sheets & Data Logic
 # ============================================================
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1kQJ7j6jgs0RqS1IRvrdyuNseZ9GKgov5YXiDq-vawCc/edit?gid=0#gid=0"
@@ -82,8 +81,6 @@ def get_google_sheet_data_cached():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-
-    # ローカルのJSONファイルを直接参照
     json_file = "service_account.json"
 
     if os.path.exists(json_file):
@@ -110,7 +107,6 @@ def get_worksheet_object():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-
     json_file = "service_account.json"
     if os.path.exists(json_file):
         creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
@@ -417,7 +413,11 @@ if page == "🤖 AIアシスタント (実務用)":
         found_candidates = []
         full_match_found = False
         if df is not None:
-            all_banks = df["金融機関名"].tolist()
+            # ★ここで空のデータをしっかり除去してリスト化する
+            all_banks = [
+                b for b in df["金融機関名"].tolist() if b and str(b).strip() != ""
+            ]
+
             if user_text in all_banks:
                 found_candidates = [user_text]
                 full_match_found = True
@@ -453,22 +453,24 @@ if page == "🤖 AIアシスタント (実務用)":
 
     visible_banks = []
     if df is not None:
-        all_banks = df["金融機関名"].tolist()
+        # ★ここでも空データ除去
+        all_banks = [b for b in df["金融機関名"].tolist() if b and str(b).strip() != ""]
         if search_query:
             s_key = search_query.strip().lower()
             visible_banks = [b for b in all_banks if s_key in b.lower()]
         else:
             visible_banks = all_banks
 
+    # グリッド表示（スクロールボックスを廃止して全表示）
     if visible_banks:
-        with st.container(height=200):
-            cols = st.columns(4)
-            for idx, b_name in enumerate(visible_banks):
-                if cols[idx % 4].button(
-                    b_name, key=f"nav_{idx}", use_container_width=True
-                ):
-                    select_bank(b_name)
-                    st.rerun()
+        # 4列でボタン配置
+        cols = st.columns(4)
+        for idx, b_name in enumerate(visible_banks):
+            if cols[idx % 4].button(b_name, key=f"nav_{idx}", use_container_width=True):
+                select_bank(b_name)
+                st.rerun()
+    else:
+        st.caption("※ 登録された銀行がありません。")
 
     if search_query and not st.session_state.candidate_list:
         if (
