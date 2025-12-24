@@ -9,7 +9,6 @@ import google.generativeai as genai
 import gspread
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from duckduckgo_search import DDGS
 from gspread_dataframe import set_with_dataframe
@@ -287,16 +286,32 @@ def fetch_bank_data_dynamic(bank_name):
     return None, "失敗"
 
 
-def focus_chat_input():
-    js = """<script>
-    function setFocus() {
-        const doc = window.parent.document;
-        const textareas = doc.querySelectorAll('textarea[data-testid="stChatInputTextArea"]');
-        if (textareas.length > 0) { textareas[0].focus(); }
-    }
-    setTimeout(setFocus, 300);
-    </script>"""
-    components.html(js, height=0, width=0)
+# ★新機能: ピンポイント調査関数
+def fetch_specific_detail(bank_name, topic):
+    """
+    データがない場合に、特定のトピック（例：残高証明）だけで検索し直す
+    """
+    try:
+        # 1. 検索実行 (スニペット取得)
+        query = f"{bank_name} 相続 {topic}"
+        results = DDGS().text(query, max_results=3)
+        if not results:
+            return "情報が見つかりませんでした。"
+
+        snippet_text = "\n".join([f"- {r.get('body', '')}" for r in results])
+
+        # 2. AIで要約
+        prompt = f"""
+        行政書士のアシスタントとして、以下の検索結果から
+        「{bank_name}」の「{topic}」に関する手続き方法を簡潔にまとめてください。
+        箇条書きで、実務に必要な情報だけを抽出してください。
+        
+        --- 検索結果 ---
+        {snippet_text}
+        """
+        return generate_ultimate_rotation(prompt)
+    except Exception as e:
+        return f"調査中にエラーが発生しました: {str(e)}"
 
 
 # ============================================================
@@ -312,44 +327,54 @@ df, _ = get_google_sheet_data_cached()
 worksheet = get_worksheet_object()
 
 # ------------------------------------------------------------
-# PAGE 1: AIアシスタント
+# PAGE 1: AIアシスタント (ダッシュボード型)
 # ------------------------------------------------------------
 if page == "🤖 AIアシスタント (実務用)":
     st.title("🤖 銀行手続 AIコンシェルジュ")
     st.info(
         "「三菱UFJ」「みずほ銀行」など入力してください。なお、ufjなど部分的な言葉でもOKです。"
     )
-    focus_chat_input()
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    # --- Session State 初期化 ---
     if "current_bank_data" not in st.session_state:
         st.session_state.current_bank_data = None
     if "candidate_list" not in st.session_state:
         st.session_state.candidate_list = None
+    if "display_result" not in st.session_state:
+        st.session_state.display_result = ""  # 結果表示用
+    if "display_title" not in st.session_state:
+        st.session_state.display_title = ""
 
-    # --- 共通処理: 銀行確定後のデータセット ---
-    def set_bank_data_and_reset(bank_name_arg):
+    # --- ロジック ---
+    def select_bank(bank_name_arg):
+        # DBからデータを取得
         if df is not None:
             found_row = df[df["金融機関名"] == bank_name_arg]
             if not found_row.empty:
                 data = found_row.iloc[0].to_dict()
                 st.session_state.current_bank_data = data
                 st.session_state.candidate_list = None
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": f"✅ **{bank_name_arg}** を選択しました。\n下の詳細メニューから選んでください。",
-                    }
+                st.session_state.display_title = f"✅ {bank_name_arg} を選択中"
+                st.session_state.display_result = (
+                    "下のボタンから詳細を選択してください。"
                 )
                 return
-        # DBにない場合は調査ロジック（通常ここには来ないが念のため）
-        handle_input(bank_name_arg)
 
-    # --- メイン入力処理 ---
+        # DBにない場合は調査ロジック
+        with st.spinner(f"{bank_name_arg} をWeb調査中..."):
+            data, status = fetch_bank_data_dynamic(bank_name_arg)
+            if status in ["Success", "Fallback"] and data:
+                st.session_state.current_bank_data = data
+                st.session_state.candidate_list = None
+                st.session_state.display_title = f"🎉 {bank_name_arg} (Web調査)"
+                st.session_state.display_result = (
+                    "下のボタンから詳細を選択してください。"
+                )
+            else:
+                st.session_state.display_title = "❌ エラー"
+                st.session_state.display_result = "情報が見つかりませんでした。"
+
     def handle_input(user_text):
-        st.session_state.messages.append({"role": "user", "content": user_text})
-
         found_candidates = []
         full_match_found = False
 
@@ -374,128 +399,165 @@ if page == "🤖 AIアシスタント (実務用)":
                 found_candidates = list(set(found_candidates))
 
         if len(found_candidates) == 1:
-            set_bank_data_and_reset(found_candidates[0])
-
+            select_bank(found_candidates[0])
         elif len(found_candidates) > 1:
             st.session_state.candidate_list = found_candidates
             st.session_state.current_bank_data = None
-            msg = "🤔 複数の候補があります。下から選択してください。"
-            st.session_state.messages.append({"role": "assistant", "content": msg})
-
+            st.session_state.display_title = "🤔 複数の候補があります"
+            st.session_state.display_result = "上のリストから選択してください。"
         else:
-            st.session_state.candidate_list = None
-            msg_searching = f"🕵️ **{user_text}** をWeb調査中..."
-            st.session_state.messages.append(
-                {"role": "assistant", "content": msg_searching}
-            )
-            with st.spinner("AIが調査中..."):
-                data, status = fetch_bank_data_dynamic(user_text)
-            if status in ["Success", "Fallback"] and data:
-                st.session_state.current_bank_data = data
-                msg_done = (
-                    f"🎉 **{data['金融機関名']}** の情報を取得しました（{status}）。"
-                )
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": msg_done}
-                )
-            else:
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": "🙏 情報が見つかりませんでした。"}
-                )
-                st.session_state.current_bank_data = None
+            # DBになければそのまま調査
+            select_bank(user_text)
 
-    # --- UI: 登録済み銀行の一覧 (クイック選択) ---
-    with st.expander("🏦 登録済みの銀行一覧を開く (クリックで選択)", expanded=True):
-        if df is not None and not df.empty:
-            all_banks = df["金融機関名"].tolist()
-            # 4列でボタン配置
+    # --- UI上部: 銀行選択パネル (常に表示) ---
+    st.write("▼ **銀行を検索・選択**")
+
+    # 検索バー
+    search_query = st.text_input(
+        "🔍 銀行名を入力 (Enterで検索)", placeholder="例: ufj, ゆうちょ..."
+    )
+    if search_query:
+        # 入力があり、かつまだ処理していない場合のみ実行
+        # (Streamlitの仕様上、ここは毎回走るので、session_state等で制御しても良いがシンプルに)
+        # 今回はシンプルに、入力があるたびにフィルタリング＆ハンドリング
+        # ただし、ループを防ぐため、ボタンで確定させるUIの方が安全だが、Enter要望なのでこのまま
+        pass
+
+    # 銀行一覧ボタン (フィルタリング付き)
+    visible_banks = []
+    if df is not None:
+        all_banks = df["金融機関名"].tolist()
+        if search_query:
+            # インクリメンタル風フィルタ
+            s_key = search_query.strip().lower()
+            visible_banks = [b for b in all_banks if s_key in b.lower()]
+
+            # もしEnterが押された(=完全一致や調査要求)場合の処理をここに仕込むのは複雑になるため
+            # ユーザーが「リストになければ検索」という意図でEnterしたとみなす
+        else:
+            visible_banks = all_banks
+
+    # グリッド表示
+    if visible_banks:
+        with st.container(height=200):  # スクロール可能領域に
             cols = st.columns(4)
-            for idx, b_name in enumerate(all_banks):
+            for idx, b_name in enumerate(visible_banks):
                 if cols[idx % 4].button(
-                    b_name, key=f"quick_{idx}", use_container_width=True
+                    b_name, key=f"nav_{idx}", use_container_width=True
                 ):
-                    # 履歴に残さず直接セットでも良いが、流れがわかるように履歴追加
-                    st.session_state.messages.append(
-                        {"role": "user", "content": f"{b_name} を選択"}
-                    )
-                    set_bank_data_and_reset(b_name)
+                    select_bank(b_name)
                     st.rerun()
-        else:
-            st.caption("登録データがありません。")
+
+    # Enter検索用 (リストにない場合など)
+    if search_query:
+        # フィルタ結果が0、またはユーザーが明示的にEnterで調査を求めた場合
+        # テキスト入力のcallbackは使わず、値の存在チェックで行う
+        # ここでは「リストクリック」を優先したいので、少しUIを工夫
+        if st.button(
+            f"「{search_query}」をWebで詳しく調査する",
+            type="primary",
+            use_container_width=True,
+        ):
+            handle_input(search_query)
+            st.rerun()
+
+    # 複数候補がある場合の追加ボタン
+    if st.session_state.candidate_list:
+        st.info("👇 以下の候補から選択してください")
+        cands = st.session_state.candidate_list
+        c_cols = st.columns(4)
+        for idx, cand in enumerate(cands):
+            if c_cols[idx % 4].button(
+                cand, key=f"cand_{cand}", use_container_width=True
+            ):
+                select_bank(cand)
+                st.rerun()
 
     st.markdown("---")
 
-    # --- UI: チャット履歴 ---
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # --- UI: 複数候補ボタン ---
-    if st.session_state.candidate_list:
-        st.markdown("##### 🔍 候補を選択してください")
-        cands = st.session_state.candidate_list
-        c_cols = st.columns(min(len(cands), 4))
-        for idx, cand in enumerate(cands):
-            if c_cols[idx % 4].button(
-                cand, key=f"btn_cand_{cand}", use_container_width=True
-            ):
-                handle_input(cand)
-                st.rerun()
-
-    # --- UI: 7項目詳細ボタン (データセット中のみ表示) ---
-    if st.session_state.current_bank_data and not st.session_state.candidate_list:
+    # --- UI下部: 詳細パネル (選択中のみ表示) ---
+    if st.session_state.current_bank_data:
         data = st.session_state.current_bank_data
-        st.markdown("---")
-        st.markdown(f"##### 👇 **{data['金融機関名']}** の詳細メニュー")
 
+        st.subheader(f"🏦 {data['金融機関名']}")
+
+        # 7つのメニューボタン
         b1, b2, b3, b4 = st.columns(4)
         b5, b6, b7, b8 = st.columns(4)
 
-        # ボタン処理 (押したら履歴追加＆Rerun)
+        target_topic = None
+        topic_label = ""
+
+        # ボタン判定 & データ欠損時の即時調査ロジック
         if b1.button("📞 連絡先", use_container_width=True):
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"**📞 連絡先**\n{data['電話番号']}"}
-            )
-            st.rerun()
+            target_topic = "電話番号"
+            topic_label = "相続センター電話番号"
         if b2.button("🧊 凍結手続", use_container_width=True):
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"**🧊 凍結手続**\n{data['凍結方法']}"}
-            )
-            st.rerun()
+            target_topic = "凍結方法"
+            topic_label = "口座凍結の手続き"
         if b3.button("📄 残高証明", use_container_width=True):
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"**📄 残高証明**\n{data['残高証明']}"}
-            )
-            st.rerun()
+            target_topic = "残高証明"
+            topic_label = "残高証明書の発行"
         if b4.button("📊 取引明細", use_container_width=True):
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"**📊 取引明細**\n{data['取引明細']}"}
-            )
-            st.rerun()
+            target_topic = "取引明細"
+            topic_label = "取引推移証明書の発行"
         if b5.button("🚪 解約手続", use_container_width=True):
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"**🚪 解約手続**\n{data['解約手続']}"}
-            )
-            st.rerun()
+            target_topic = "解約手続"
+            topic_label = "相続預金の解約手続"
         if b6.button("📈 投信国債", use_container_width=True):
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"**📈 投信国債**\n{data['投信国債']}"}
-            )
-            st.rerun()
+            target_topic = "投信国債"
+            topic_label = "投資信託・国債の相続"
         if b7.button("🔐 貸金庫", use_container_width=True):
-            st.session_state.messages.append(
-                {"role": "assistant", "content": f"**🔐 貸金庫**\n{data['貸金庫']}"}
-            )
-            st.rerun()
+            target_topic = "貸金庫"
+            topic_label = "貸金庫の相続手続"
         if b8.button("💡 全て表示", use_container_width=True):
-            full_msg = f"### {data['金融機関名']} 全情報\n**📞**: {data['電話番号']}\n**🧊**: {data['凍結方法']}\n**📄**: {data['残高証明']}\n**🚪**: {data['解約手続']}\n**💡**: {data['AI要約']}"
-            st.session_state.messages.append({"role": "assistant", "content": full_msg})
+            target_topic = "ALL"
+
+        # 処理実行
+        if target_topic:
+            if target_topic == "ALL":
+                st.session_state.display_title = "💡 全情報"
+                st.session_state.display_result = f"""
+**📞 連絡先**: {data.get("電話番号", "")}
+**🧊 凍結**: {data.get("凍結方法", "")}
+**📄 残高証明**: {data.get("残高証明", "")}
+**📊 取引明細**: {data.get("取引明細", "")}
+**🚪 解約**: {data.get("解約手続", "")}
+**📈 投信**: {data.get("投信国債", "")}
+**🔐 貸金庫**: {data.get("貸金庫", "")}
+**💡 要約**: {data.get("AI要約", "")}
+                """
+            else:
+                # データチェック
+                content = data.get(target_topic, "")
+                if not content or content in ["", "記載なし", "不明"]:
+                    # ★ここが新機能: データがないならその場で調べる
+                    st.session_state.display_title = f"🔍 {topic_label} (Web調査中...)"
+                    with st.spinner(
+                        f"データが空のため、Webで「{topic_label}」を再調査しています..."
+                    ):
+                        fetched_info = fetch_specific_detail(
+                            data["金融機関名"], topic_label
+                        )
+                        st.session_state.display_result = fetched_info
+                        st.session_state.display_title = f"✅ {topic_label} (Web取得)"
+                else:
+                    st.session_state.display_title = f"✅ {topic_label}"
+                    st.session_state.display_result = content
+
             st.rerun()
 
-    # --- UI: メイン入力欄 ---
-    if prompt := st.chat_input("銀行名を入力 (Web検索する場合)..."):
-        handle_input(prompt)
-        st.rerun()
+        # 結果表示エリア
+        if st.session_state.display_result:
+            with st.container(border=True):
+                st.markdown(f"#### {st.session_state.display_title}")
+                st.markdown(st.session_state.display_result)
+
+        if data.get("WebサイトURL"):
+            st.link_button("🔗 公式サイトを開く", data["WebサイトURL"])
+
+    else:
+        st.info("👆 上のリストから銀行を選択するか、検索してください。")
 
 # ------------------------------------------------------------
 # PAGE 2: マスタ管理
