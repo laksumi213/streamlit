@@ -247,6 +247,7 @@ def run_selenium_and_extract(target_url):
         return None, f"Error: {str(e)}"
 
 
+# ★チャット用（検索必須）
 def fetch_bank_data_dynamic(bank_name):
     found_url, snippet = search_new_url_with_snippet(bank_name)
     if not found_url:
@@ -287,6 +288,40 @@ def fetch_bank_data_dynamic(bank_name):
     return None, "失敗"
 
 
+# ★管理画面用（URL優先更新）
+def update_bank_data_smart(bank_name, existing_url):
+    # 1. 既存URLがある場合はそれを優先（検索ブロック回避）
+    target_url = existing_url
+    if not target_url or pd.isna(target_url) or target_url == "":
+        # URLがなければマスタから補完
+        if bank_name in BANK_MASTER_DB:
+            target_url = BANK_MASTER_DB[bank_name]
+
+    # 2. URLがあればSelenium実行
+    if target_url:
+        st.write(f"   → サイト解析: {target_url}")
+        res_json, status = run_selenium_and_extract(target_url)
+        data = extract_json_from_text(res_json)
+        if status == "Success" and data:
+            return {
+                "金融機関名": bank_name,
+                "WebサイトURL": target_url,
+                "電話番号": data.get("contact_phone", ""),
+                "凍結方法": data.get("freeze_method", ""),
+                "残高証明": data.get("balance_cert", ""),
+                "取引明細": data.get("transaction_history", ""),
+                "解約手続": data.get("cancellation", ""),
+                "投信国債": data.get("investment", ""),
+                "貸金庫": data.get("safe_deposit", ""),
+                "AI要約": data.get("summary", ""),
+                "最終更新": "一括更新",
+            }, "Success"
+
+    # 3. URLがない、または失敗した場合は検索へ
+    st.write("   → URL不明/失敗のため検索中...")
+    return fetch_bank_data_dynamic(bank_name)
+
+
 def fetch_specific_detail(bank_name, topic):
     try:
         query = f"{bank_name} 相続 {topic}"
@@ -306,35 +341,28 @@ def fetch_specific_detail(bank_name, topic):
         return f"調査中にエラーが発生しました: {str(e)}"
 
 
-# ★オートフォーカス用の新スクリプト
+# JavaScript Hooks
 def focus_search_input():
-    js = """
-    <script>
-        function setFocus() {
-            const doc = window.parent.document;
-            const inputs = doc.querySelectorAll('input[type="text"]');
-            if (inputs.length > 0) { inputs[0].focus(); }
-        }
-        setTimeout(setFocus, 300);
-    </script>
-    """
+    js = """<script>
+    function setFocus() {
+        const doc = window.parent.document;
+        const inputs = doc.querySelectorAll('input[type="text"]');
+        if (inputs.length > 0) { inputs[0].focus(); }
+    }
+    setTimeout(setFocus, 300);
+    </script>"""
     components.html(js, height=0, width=0)
 
 
-# ★自動スクロール用の新スクリプト
 def scroll_to_results():
-    js = """
-    <script>
-        function scrollToResult() {
-            const doc = window.parent.document;
-            const element = doc.getElementById("result_anchor");
-            if (element) {
-                element.scrollIntoView({behavior: "smooth", block: "start"});
-            }
-        }
-        setTimeout(scrollToResult, 500);
-    </script>
-    """
+    js = """<script>
+    function scrollToResult() {
+        const doc = window.parent.document;
+        const element = doc.getElementById("result_anchor");
+        if (element) { element.scrollIntoView({behavior: "smooth", block: "start"}); }
+    }
+    setTimeout(scrollToResult, 500);
+    </script>"""
     components.html(js, height=0, width=0)
 
 
@@ -359,7 +387,6 @@ if page == "🤖 AIアシスタント (実務用)":
         "「三菱UFJ」「みずほ銀行」など入力してください。なお、ufjなど部分的な言葉でもOKです。"
     )
 
-    # --- Session State 初期化 ---
     if "current_bank_data" not in st.session_state:
         st.session_state.current_bank_data = None
     if "candidate_list" not in st.session_state:
@@ -369,7 +396,6 @@ if page == "🤖 AIアシスタント (実務用)":
     if "display_title" not in st.session_state:
         st.session_state.display_title = ""
 
-    # --- ロジック ---
     def select_bank(bank_name_arg):
         if df is not None:
             found_row = df[df["金融機関名"] == bank_name_arg]
@@ -399,7 +425,6 @@ if page == "🤖 AIアシスタント (実務用)":
     def handle_input(user_text):
         found_candidates = []
         full_match_found = False
-
         if df is not None:
             all_banks = df["金融機関名"].tolist()
             if user_text in all_banks:
@@ -430,14 +455,11 @@ if page == "🤖 AIアシスタント (実務用)":
         else:
             select_bank(user_text)
 
-    # --- UI: 検索バー ---
+    # UI
     st.write("▼ **銀行を検索・選択**")
-
-    # テキスト入力欄
     search_query = st.text_input("🔍 銀行名を入力 (Enterで検索)", key="main_search_bar")
     focus_search_input()
 
-    # 銀行一覧 (フィルタリング)
     visible_banks = []
     if df is not None:
         all_banks = df["金融機関名"].tolist()
@@ -447,7 +469,6 @@ if page == "🤖 AIアシスタント (実務用)":
         else:
             visible_banks = all_banks
 
-    # 一覧グリッド
     if visible_banks:
         with st.container(height=200):
             cols = st.columns(4)
@@ -458,22 +479,6 @@ if page == "🤖 AIアシスタント (実務用)":
                     select_bank(b_name)
                     st.rerun()
 
-    if search_query:
-        # 入力値があり、かつまだその銀行が選択状態になっていない場合のEnter検知用ロジック
-        is_already_selected = False
-        if st.session_state.current_bank_data:
-            if st.session_state.current_bank_data["金融機関名"] == search_query:
-                is_already_selected = True
-
-        # Enterで確定されたがボタンクリックではない場合
-        # ボタンクリック時は st.rerun() で抜けるのでここは通らないはず
-        if not is_already_selected and not st.session_state.candidate_list:
-            # ここでリストにあるかチェック
-            if not visible_banks:
-                # リストにない場合のみ自動実行（リストにあるならボタンを押してほしいがEnterなら先頭を選択等の挙動もあり）
-                handle_input(search_query)
-                st.rerun()
-
     if search_query and not st.session_state.candidate_list:
         if (
             not st.session_state.current_bank_data
@@ -483,7 +488,6 @@ if page == "🤖 AIアシスタント (実務用)":
                 handle_input(search_query)
                 st.rerun()
 
-    # 候補選択
     if st.session_state.candidate_list:
         st.info("👇 以下の候補から選択してください")
         cands = st.session_state.candidate_list
@@ -496,15 +500,10 @@ if page == "🤖 AIアシスタント (実務用)":
                 st.rerun()
 
     st.markdown("---")
-
-    # --- UI: 詳細パネル ---
-    # ★ここにスクロール用のアンカーを設置
     st.markdown('<div id="result_anchor"></div>', unsafe_allow_html=True)
 
     if st.session_state.current_bank_data:
-        # ★データが表示されるとき、スクロールを実行
         scroll_to_results()
-
         data = st.session_state.current_bank_data
         st.subheader(f"🏦 {data['金融機関名']}")
 
@@ -603,23 +602,31 @@ elif page == "📝 マスタ管理・更新 (管理者用)":
                 status = st.empty()
                 for i, row in df.iterrows():
                     bank = row["金融機関名"]
-                    status.text(f"調査中: {bank}")
-                    res_data, stat = fetch_bank_data_dynamic(bank)
+                    status.text(f"調査中: {bank} ...")
+
+                    # ★ここが重要：URLがある場合はそれを優先する「smart」関数を使用
+                    res_data, stat = update_bank_data_smart(bank, row["WebサイトURL"])
+
                     if stat in ["Success", "Fallback"] and res_data:
                         for k in COLS:
                             if k in res_data:
                                 df.at[i, k] = res_data[k]
+
                     import datetime
 
                     df.at[i, "最終更新"] = datetime.datetime.now().strftime(
                         "%Y-%m-%d %H:%M"
                     )
+
                     if (i + 1) % 3 == 0:
                         save_to_google_sheet(worksheet, df)
                         time.sleep(1)
                     bar.progress((i + 1) / total)
-                status.success("完了")
+
+                save_to_google_sheet(worksheet, df)
+                status.success("完了！")
                 st.cache_data.clear()
+                time.sleep(1)
                 st.rerun()
 
     if df is not None:
