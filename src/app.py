@@ -20,8 +20,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-
-# ローカル用
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ============================================================
@@ -76,7 +74,7 @@ def generate_ultimate_rotation(prompt):
 
 
 # ============================================================
-# ★ Google Sheets 接続設定 (API制限対策強化)
+# ★ Google Sheets & Data Logic
 # ============================================================
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/xxxxxxxx/edit"
@@ -84,14 +82,12 @@ if "SHEET_URL" in st.secrets:
     SHEET_URL = st.secrets["SHEET_URL"]
 
 
-# ★対策1: データをキャッシュして、無駄な読み取り回数を減らす
-@st.cache_data(ttl=60)  # 60秒間はデータを記憶する
+@st.cache_data(ttl=60)
 def get_google_sheet_data_cached():
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-
     if "gcp_service_account" in st.secrets:
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -101,24 +97,20 @@ def get_google_sheet_data_cached():
             creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
         else:
             return None, None
-
     client = gspread.authorize(creds)
     try:
         sheet = client.open_by_url(SHEET_URL)
         worksheet = sheet.get_worksheet(0)
         data = worksheet.get_all_values()
-
         if not data:
             return pd.DataFrame(), worksheet
-
         headers = data.pop(0)
         df = pd.DataFrame(data, columns=headers)
         return df, worksheet
-    except Exception:
+    except:
         return None, None
 
 
-# キャッシュを使わない書き込み用関数（worksheetオブジェクトを取得するため）
 def get_worksheet_object():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -146,15 +138,12 @@ def save_to_google_sheet(worksheet, df):
         worksheet.clear()
         set_with_dataframe(worksheet, df)
     except Exception as e:
-        st.warning(f"保存中に一時的なエラーが発生しました（スキップします）: {e}")
+        st.warning(f"保存エラー(スキップ): {e}")
 
 
 # ============================================================
-# アプリケーション本体
+# スクレイピング & AI解析ロジック
 # ============================================================
-
-st.set_page_config(page_title="銀行マスタ管理 Cloud", layout="wide")
-st.title("🏦 銀行手続き完全自動化システム (Cloud版)")
 
 BANK_MASTER_DB = {
     "三菱UFJ銀行": "https://www.bk.mufg.jp/tsukau/tetsuduki/souzoku/index.html",
@@ -194,10 +183,10 @@ def find_bank_url(bank_name):
 def ask_gemini_to_extract(html_text):
     prompt = f"""
     以下のHTMLから銀行情報を抽出し、必ず以下のJSON形式のみを出力してください。
-    余計な装飾は一切不要です。
+    Markdown装飾は不要です。
     {{
         "phone": "電話番号", "hours": "受付時間",
-        "method": "手続き方法", "summary": "要約"
+        "method": "手続き方法", "summary": "要約(注意点など)"
     }}
     HTML: {html_text[:30000]} 
     """
@@ -216,11 +205,9 @@ def extract_json_from_text(text):
 
 def process_single_bank(bank_name, target_url):
     if not target_url or pd.isna(target_url) or target_url == "":
-        st.write(f"🔍URL確認中: {bank_name}...")
         found = find_bank_url(bank_name)
         if found:
             target_url = found
-            st.write(f"   → URLセット: {target_url}")
         else:
             return None, "URLなし", ""
 
@@ -236,7 +223,6 @@ def process_single_bank(bank_name, target_url):
     try:
         chromium_path = shutil.which("chromium")
         chromedriver_path = shutil.which("chromedriver")
-
         if chromium_path and chromedriver_path:
             options.binary_location = chromium_path
             service = Service(executable_path=chromedriver_path)
@@ -247,108 +233,122 @@ def process_single_bank(bank_name, target_url):
         driver.set_page_load_timeout(60)
         driver.get(target_url)
         time.sleep(5)
-
         body = driver.find_element("tag name", "body").text
         driver.quit()
-
         json_text = ask_gemini_to_extract(body)
         return json_text, "Success", target_url
-
     except Exception as e:
         return None, f"Error: {str(e)}", target_url
 
 
-# --- メイン処理 ---
+# ============================================================
+# ★ アプリケーション本体 (Page構成)
+# ============================================================
 
-# 読み込みはキャッシュ付き関数を使用
+st.set_page_config(page_title="銀行手続システム", layout="wide")
+
+# パスワード認証（必要な場合）
+# def check_password(): ... (省略)
+
+# サイドバーでページ切り替え
+page = st.sidebar.radio(
+    "メニュー選択", ["🤖 AIアシスタント (実務用)", "📝 マスタ管理・更新 (管理者用)"]
+)
+
+# データをロード
 df, _ = get_google_sheet_data_cached()
-worksheet = get_worksheet_object()  # 書き込み用オブジェクトは別途取得
+worksheet = get_worksheet_object()
 
-# データがない場合の初期化
-if df is not None and df.empty:
-    bank_names = list(BANK_MASTER_DB.keys())
-    init_urls = [BANK_MASTER_DB[name] for name in bank_names]
-
-    df = pd.DataFrame(
-        {
-            "金融機関名": bank_names,
-            "WebサイトURL": init_urls,
-            "電話番号": [""] * len(bank_names),
-            "受付時間": [""] * len(bank_names),
-            "手続き方法": [""] * len(bank_names),
-            "AI要約": ["未取得"] * len(bank_names),
-            "最終更新": ["-"] * len(bank_names),
-        }
+# ------------------------------------------------------------
+# PAGE 1: AIアシスタント (Chat Interface)
+# ------------------------------------------------------------
+if page == "🤖 AIアシスタント (実務用)":
+    st.title("🤖 銀行手続 AIコンシェルジュ")
+    st.info(
+        "「三菱UFJの手続きはどうすればいい？」「〇〇銀行に電話する時の台本を作って」などと話しかけてください。"
     )
-    if worksheet:
-        save_to_google_sheet(worksheet, df)
-        st.cache_data.clear()
-        st.rerun()
 
-st.markdown("### 🚀 一括自動収集")
-col1, col2 = st.columns([2, 1])
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-with col1:
-    if st.button("全銀行更新 (Cloud)", type="primary"):
-        if df is not None and worksheet is not None:
-            total = len(df)
-            bar = st.progress(0)
-            status_text = st.empty()
+    # チャット履歴の表示
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-            for i, row in df.iterrows():
-                bank = row["金融機関名"]
-                current_url = (
-                    row["WebサイトURL"] if "WebサイトURL" in df.columns else ""
-                )
+    # ユーザー入力
+    if prompt := st.chat_input("何でも聞いてください..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-                status_text.text(f"アクセス中: {bank} ...")
+        with st.chat_message("assistant"):
+            with st.spinner("データベースを確認して回答を作成中..."):
+                # 1. ユーザーの質問に含まれる銀行名を探す
+                relevant_info = ""
+                found_bank = None
 
-                # スクレイピング実行
-                res_json_text, status, final_url = process_single_bank(
-                    bank, current_url
-                )
+                if df is not None:
+                    for bank in df["金融機関名"].tolist():
+                        if bank in prompt:
+                            # 該当する銀行のデータを取得
+                            row = df[df["金融機関名"] == bank].iloc[0]
+                            relevant_info = f"""
+                            【{bank} の登録データ】
+                            - 電話番号: {row["電話番号"]}
+                            - 受付時間: {row["受付時間"]}
+                            - 手続方法: {row["手続き方法"]}
+                            - AI要約: {row["AI要約"]}
+                            - Webサイト: {row["WebサイトURL"]}
+                            """
+                            found_bank = bank
+                            break
 
-                # 結果の反映
-                if final_url:
-                    df.at[i, "WebサイトURL"] = final_url
+                # 2. Geminiへのプロンプト作成
+                system_prompt = f"""
+                あなたは行政書士事務所の優秀なアシスタントAIです。
+                ユーザーは銀行の相続手続きを行おうとしています。
+                
+                以下の「データベース情報」をもとに、ユーザーの質問に具体的に答えてください。
+                もしデータベースに情報があれば、それを優先して回答してください。
+                電話をかけるシチュエーションなら、丁寧な「問い合わせ台本」を作成してください。
+                
+                --- データベース情報 ---
+                {relevant_info if relevant_info else "（該当する銀行データが見つかりませんでした。一般的な知識で回答してください。）"}
+                
+                --- ユーザーの質問 ---
+                {prompt}
+                """
 
-                if status == "Success" and res_json_text:
-                    data = extract_json_from_text(res_json_text)
-                    if data:
-                        df.at[i, "電話番号"] = data.get("phone", "不明")
-                        df.at[i, "受付時間"] = data.get("hours", "不明")
-                        df.at[i, "手続き方法"] = data.get("method", "不明")
-                        df.at[i, "AI要約"] = data.get("summary", "抽出成功")
-                    else:
-                        df.at[i, "AI要約"] = "JSON解析失敗"
-                elif status != "Success":
-                    df.at[i, "AI要約"] = f"アクセス失敗: {status}"
+                # 3. 回答生成
+                response_text = generate_ultimate_rotation(system_prompt)
+                st.markdown(response_text)
 
-                import datetime
+                # リンクボタンの表示（気が利く機能）
+                if found_bank and relevant_info:
+                    row = df[df["金融機関名"] == found_bank].iloc[0]
+                    if row["WebサイトURL"]:
+                        st.link_button(
+                            f"🔗 {found_bank}のWebサイトを開く", row["WebサイトURL"]
+                        )
 
-                df.at[i, "最終更新"] = datetime.datetime.now().strftime(
-                    "%Y-%m-%d %H:%M"
-                )
+        st.session_state.messages.append(
+            {"role": "assistant", "content": response_text}
+        )
 
-                # ★対策2: 3件に1回、または最後にまとめて保存する（API制限回避）
-                if (i + 1) % 3 == 0 or (i + 1) == total:
-                    save_to_google_sheet(worksheet, df)
-                    status_text.text(f"データ保存中... ({i + 1}/{total})")
-                    time.sleep(2)  # 保存後に少し休む
 
-                bar.progress((i + 1) / total)
+# ------------------------------------------------------------
+# PAGE 2: マスタ管理 (Grid & Scraping)
+# ------------------------------------------------------------
+elif page == "📝 マスタ管理・更新 (管理者用)":
+    st.title("📝 銀行マスタ管理画面")
+    st.warning("ここは情報の閲覧・修正・一括更新を行う画面です。")
 
-            status_text.success("完了！リロードします")
-            st.cache_data.clear()  # 新しいデータを反映させるためにキャッシュクリア
-            time.sleep(1)
-            st.rerun()
-
-with col2:
-    if st.button("⚠️ 銀行リストを初期化・再読込"):
+    # 初期化ロジック
+    if df is not None and df.empty:
         bank_names = list(BANK_MASTER_DB.keys())
         init_urls = [BANK_MASTER_DB[name] for name in bank_names]
-
-        new_df = pd.DataFrame(
+        df = pd.DataFrame(
             {
                 "金融機関名": bank_names,
                 "WebサイトURL": init_urls,
@@ -360,23 +360,92 @@ with col2:
             }
         )
         if worksheet:
-            save_to_google_sheet(worksheet, new_df)
+            save_to_google_sheet(worksheet, df)
             st.cache_data.clear()
-            st.warning("リストを初期化しました。")
-            time.sleep(1)
             st.rerun()
 
-st.markdown("---")
-if df is not None:
-    column_config = {
-        "WebサイトURL": st.column_config.LinkColumn("URL", display_text="開く")
-    }
-    edited_df = st.data_editor(
-        df, column_config=column_config, num_rows="dynamic", use_container_width=True
-    )
+    # 自動収集エリア
+    with st.expander("🚀 データ一括更新パネル（管理者のみ操作）"):
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            if st.button("全銀行更新 (Cloud)", type="primary"):
+                if df is not None and worksheet is not None:
+                    total = len(df)
+                    bar = st.progress(0)
+                    status = st.empty()
+                    for i, row in df.iterrows():
+                        bank = row["金融機関名"]
+                        url = (
+                            row["WebサイトURL"] if "WebサイトURL" in df.columns else ""
+                        )
+                        status.text(f"処理中: {bank}")
+                        res_json, stat, final_url = process_single_bank(bank, url)
 
-    if st.button("手動変更を保存"):
-        if worksheet:
-            save_to_google_sheet(worksheet, edited_df)
-            st.cache_data.clear()
-            st.success("スプレッドシートに保存しました")
+                        if final_url:
+                            df.at[i, "WebサイトURL"] = final_url
+                        if stat == "Success" and res_json:
+                            d = extract_json_from_text(res_json)
+                            if d:
+                                df.at[i, "電話番号"] = d.get("phone", "")
+                                df.at[i, "受付時間"] = d.get("hours", "")
+                                df.at[i, "手続き方法"] = d.get("method", "")
+                                df.at[i, "AI要約"] = d.get("summary", "")
+                            else:
+                                df.at[i, "AI要約"] = "Parse Error"
+                        elif stat != "Success":
+                            df.at[i, "AI要約"] = f"Error: {stat}"
+
+                        import datetime
+
+                        df.at[i, "最終更新"] = datetime.datetime.now().strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+
+                        if (i + 1) % 3 == 0 or (i + 1) == total:
+                            save_to_google_sheet(worksheet, df)
+                            status.text("Saving...")
+                            time.sleep(2)
+                        bar.progress((i + 1) / total)
+                    status.success("完了")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+
+        with col2:
+            if st.button("⚠️ リスト初期化"):
+                names = list(BANK_MASTER_DB.keys())
+                new_df = pd.DataFrame(
+                    {
+                        "金融機関名": names,
+                        "WebサイトURL": [BANK_MASTER_DB[n] for n in names],
+                        "電話番号": [""] * len(names),
+                        "受付時間": [""] * len(names),
+                        "手続き方法": [""] * len(names),
+                        "AI要約": ["未取得"] * len(names),
+                        "最終更新": ["-"] * len(names),
+                    }
+                )
+                if worksheet:
+                    save_to_google_sheet(worksheet, new_df)
+                    st.cache_data.clear()
+                    st.warning("初期化しました")
+                    time.sleep(1)
+                    st.rerun()
+
+    # データ編集エリア
+    st.markdown("---")
+    if df is not None:
+        cfg = {"WebサイトURL": st.column_config.LinkColumn("URL", display_text="開く")}
+        edited_df = st.data_editor(
+            df,
+            column_config=cfg,
+            num_rows="dynamic",
+            use_container_width=True,
+            height=600,
+        )
+
+        if st.button("手動変更を保存"):
+            if worksheet:
+                save_to_google_sheet(worksheet, edited_df)
+                st.cache_data.clear()
+                st.success("保存しました")
