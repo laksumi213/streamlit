@@ -1,0 +1,11 @@
+streamlit
+pandas
+openpyxl
+python-dotenv
+google-generativeai
+selenium
+webdriver-manager
+duckduckgo-search
+gspread
+oauth2client
+gspread-dataframe
