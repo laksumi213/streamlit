@@ -8,7 +8,7 @@ import google.generativeai as genai
 import gspread
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv  # ローカル開発用
+from dotenv import load_dotenv
 from duckduckgo_search import DDGS
 from google.api_core import exceptions
 from gspread_dataframe import set_with_dataframe
@@ -21,11 +21,10 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ============================================================
-# ★設定エリア (Cloud & Local Hybrid)
+# ★設定エリア
 # ============================================================
 
-# 1. APIキーの読み込み (Streamlit CloudのSecrets または .env)
-# クラウド上のSecretsを優先し、なければローカルの.envを見る
+# APIキーの読み込み (Streamlit CloudのSecrets または .env)
 if "GOOGLE_API_KEYS" in st.secrets:
     env_keys = st.secrets["GOOGLE_API_KEYS"]
 else:
@@ -77,8 +76,6 @@ def generate_ultimate_rotation(prompt):
 # ★ Google Sheets 接続設定
 # ============================================================
 
-# スプレッドシートのURL (Secretsから取得推奨だが、今はコードに書いてもOK)
-# ★ここにSTEP1で作ったスプレッドシートのURLを入れてください
 SHEET_URL = "https://docs.google.com/spreadsheets/d/xxxxxxxx/edit"
 if "SHEET_URL" in st.secrets:
     SHEET_URL = st.secrets["SHEET_URL"]
@@ -91,13 +88,10 @@ def get_google_sheet_data():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    # Secretsから認証情報を取得 (Streamlit Cloud用)
     if "gcp_service_account" in st.secrets:
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    # ローカル開発用 (JSONファイルを直接指定)
     else:
-        # ★ダウンロードしたJSONファイルの名前を書いてください
         json_file = "service_account.json"
         if os.path.exists(json_file):
             creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
@@ -108,10 +102,10 @@ def get_google_sheet_data():
     client = gspread.authorize(creds)
     try:
         sheet = client.open_by_url(SHEET_URL)
-        worksheet = sheet.get_worksheet(0)  # 1枚目のシート
+        worksheet = sheet.get_worksheet(0)
         data = worksheet.get_all_values()
 
-        if not data:  # 空っぽの場合
+        if not data:
             return pd.DataFrame(), worksheet
 
         headers = data.pop(0)
@@ -124,8 +118,8 @@ def get_google_sheet_data():
 
 def save_to_google_sheet(worksheet, df):
     """データフレームをスプレッドシートに保存"""
-    worksheet.clear()  # 一度クリア
-    set_with_dataframe(worksheet, df)  # 書き込み
+    worksheet.clear()
+    set_with_dataframe(worksheet, df)
 
 
 # ============================================================
@@ -135,8 +129,29 @@ def save_to_google_sheet(worksheet, df):
 st.set_page_config(page_title="銀行マスタ管理 Cloud", layout="wide")
 st.title("🏦 銀行手続き完全自動化システム (Cloud版)")
 
+# --- 銀行リストの定義 ---
+FULL_BANK_LIST = [
+    "三菱UFJ銀行",
+    "三井住友銀行",
+    "みずほ銀行",
+    "ゆうちょ銀行",
+    "りそな銀行",
+    "埼玉りそな銀行",
+    "横浜銀行",
+    "千葉銀行",
+    "福岡銀行",
+    "静岡銀行",
+    "常陽銀行",
+    "楽天銀行",
+    "住信SBIネット銀行",
+    "ソニー銀行",
+    "auじぶん銀行",
+    "三井住友信託銀行",
+    "三菱UFJ信託銀行",
+    "みずほ信託銀行",
+]
 
-# --- 1. URL検索 & AI解析 ---
+
 def find_bank_url(bank_name):
     try:
         query = f"{bank_name} 相続手続き"
@@ -169,9 +184,8 @@ def process_single_bank(bank_name, target_url):
         else:
             return None, "URLなし", ""
 
-    # ★クラウド用Selenium設定（必須）
     options = Options()
-    options.add_argument("--headless")  # 画面なし
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -194,47 +208,25 @@ def process_single_bank(bank_name, target_url):
 
 # --- メイン処理 ---
 
-# データ読み込み
 df, worksheet = get_google_sheet_data()
 
 # 初回起動などでシートが空の場合の初期化
 if df is not None and df.empty:
-    FULL_BANK_LIST = [
-        "三菱UFJ銀行",
-        "三井住友銀行",
-        "みずほ銀行",
-        "ゆうちょ銀行",
-        "りそな銀行",
-        "埼玉りそな銀行",
-        "横浜銀行",
-        "千葉銀行",
-        "福岡銀行",
-        "静岡銀行",
-        "常陽銀行",
-        "楽天銀行",
-        "住信SBIネット銀行",
-        "ソニー銀行",
-        "auじぶん銀行",
-        "三井住友信託銀行",
-        "三菱UFJ信託銀行",
-        "みずほ信託銀行",
-    ]
-    if df is not None and df.empty:
-        df = pd.DataFrame(
-            {
-                "金融機関名": FULL_BANK_LIST,
-                "WebサイトURL": [""] * len(FULL_BANK_LIST),
-                "電話番号": [""] * len(FULL_BANK_LIST),
-                "受付時間": [""] * len(FULL_BANK_LIST),
-                "手続き方法": [""] * len(FULL_BANK_LIST),
-                "AI要約": ["未取得"] * len(FULL_BANK_LIST),
-                "最終更新": ["-"] * len(FULL_BANK_LIST),
-            }
-        )
-        save_to_google_sheet(worksheet, df)
-        st.experimental_rerun()
+    df = pd.DataFrame(
+        {
+            "金融機関名": FULL_BANK_LIST,
+            "WebサイトURL": [""] * len(FULL_BANK_LIST),
+            "電話番号": [""] * len(FULL_BANK_LIST),
+            "受付時間": [""] * len(FULL_BANK_LIST),
+            "手続き方法": [""] * len(FULL_BANK_LIST),
+            "AI要約": ["未取得"] * len(FULL_BANK_LIST),
+            "最終更新": ["-"] * len(FULL_BANK_LIST),
+        }
+    )
+    save_to_google_sheet(worksheet, df)
+    st.rerun()
 
-# UI: 自動収集エリア
+# UI: 自動収集
 st.markdown("### 🚀 一括自動収集")
 col1, col2 = st.columns([2, 1])
 
@@ -273,17 +265,14 @@ with col1:
                     except:
                         pass
 
-                # 1行ごとに保存
                 save_to_google_sheet(worksheet, df)
                 bar.progress((i + 1) / total)
 
             status_text.text("完了！")
             st.success("全てのデータを更新しました！")
 
-# ★ここが新機能：データリセットボタン
 with col2:
     if st.button("⚠️ 銀行リストを初期化・再読込"):
-        # スプレッドシートを強制的にFULL_BANK_LISTで上書きする
         new_df = pd.DataFrame(
             {
                 "金融機関名": FULL_BANK_LIST,
@@ -296,7 +285,7 @@ with col2:
             }
         )
         save_to_google_sheet(worksheet, new_df)
-        st.warning("リストを初期化しました。ページをリロードします。")
+        st.warning("リストを初期化しました。")
         time.sleep(1)
         st.rerun()
 
