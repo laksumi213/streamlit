@@ -1,7 +1,7 @@
 import json
 import os
 import re
-import shutil  # 追加：インストールされているコマンドを探す用
+import shutil
 import time
 
 import google.generativeai as genai
@@ -21,7 +21,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
-# ローカル用（クラウドでは使わないがインポートしておく）
+# ローカル用
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ============================================================
@@ -76,7 +76,7 @@ def generate_ultimate_rotation(prompt):
 
 
 # ============================================================
-# ★ Google Sheets 接続設定
+# ★ Google Sheets 接続設定 (API制限対策強化)
 # ============================================================
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/xxxxxxxx/edit"
@@ -84,7 +84,9 @@ if "SHEET_URL" in st.secrets:
     SHEET_URL = st.secrets["SHEET_URL"]
 
 
-def get_google_sheet_data():
+# ★対策1: データをキャッシュして、無駄な読み取り回数を減らす
+@st.cache_data(ttl=60)  # 60秒間はデータを記憶する
+def get_google_sheet_data_cached():
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -98,7 +100,6 @@ def get_google_sheet_data():
         if os.path.exists(json_file):
             creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
         else:
-            st.error("認証ファイルが見つかりません")
             return None, None
 
     client = gspread.authorize(creds)
@@ -113,14 +114,39 @@ def get_google_sheet_data():
         headers = data.pop(0)
         df = pd.DataFrame(data, columns=headers)
         return df, worksheet
-    except Exception as e:
-        st.error(f"スプレッドシート接続エラー: {e}")
+    except Exception:
         return None, None
 
 
+# キャッシュを使わない書き込み用関数（worksheetオブジェクトを取得するため）
+def get_worksheet_object():
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    if "gcp_service_account" in st.secrets:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        json_file = "service_account.json"
+        if os.path.exists(json_file):
+            creds = ServiceAccountCredentials.from_json_keyfile_name(json_file, scope)
+        else:
+            return None
+    client = gspread.authorize(creds)
+    try:
+        sheet = client.open_by_url(SHEET_URL)
+        return sheet.get_worksheet(0)
+    except:
+        return None
+
+
 def save_to_google_sheet(worksheet, df):
-    worksheet.clear()
-    set_with_dataframe(worksheet, df)
+    try:
+        worksheet.clear()
+        set_with_dataframe(worksheet, df)
+    except Exception as e:
+        st.warning(f"保存中に一時的なエラーが発生しました（スキップします）: {e}")
 
 
 # ============================================================
@@ -198,7 +224,6 @@ def process_single_bank(bank_name, target_url):
         else:
             return None, "URLなし", ""
 
-    # --- ★ここが重要：Cloud環境とローカル環境の自動判別 ---
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -209,20 +234,14 @@ def process_single_bank(bank_name, target_url):
     )
 
     try:
-        # Streamlit Cloud (Linux) 環境には 'chromium' がインストールされるはず
-        # shutil.which でインストールされている場所を探す
         chromium_path = shutil.which("chromium")
         chromedriver_path = shutil.which("chromedriver")
 
         if chromium_path and chromedriver_path:
-            # クラウド環境の場合：インストールされたChromiumを使う
             options.binary_location = chromium_path
             service = Service(executable_path=chromedriver_path)
-            # st.write("Running in Cloud Mode (Chromium found)") # デバッグ用
         else:
-            # ローカル環境の場合：今まで通り webdriver_manager を使う
             service = Service(ChromeDriverManager().install())
-            # st.write("Running in Local Mode (Webdriver Manager)") # デバッグ用
 
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(60)
@@ -241,8 +260,11 @@ def process_single_bank(bank_name, target_url):
 
 # --- メイン処理 ---
 
-df, worksheet = get_google_sheet_data()
+# 読み込みはキャッシュ付き関数を使用
+df, _ = get_google_sheet_data_cached()
+worksheet = get_worksheet_object()  # 書き込み用オブジェクトは別途取得
 
+# データがない場合の初期化
 if df is not None and df.empty:
     bank_names = list(BANK_MASTER_DB.keys())
     init_urls = [BANK_MASTER_DB[name] for name in bank_names]
@@ -258,15 +280,17 @@ if df is not None and df.empty:
             "最終更新": ["-"] * len(bank_names),
         }
     )
-    save_to_google_sheet(worksheet, df)
-    st.rerun()
+    if worksheet:
+        save_to_google_sheet(worksheet, df)
+        st.cache_data.clear()
+        st.rerun()
 
 st.markdown("### 🚀 一括自動収集")
 col1, col2 = st.columns([2, 1])
 
 with col1:
     if st.button("全銀行更新 (Cloud)", type="primary"):
-        if df is not None:
+        if df is not None and worksheet is not None:
             total = len(df)
             bar = st.progress(0)
             status_text = st.empty()
@@ -279,10 +303,12 @@ with col1:
 
                 status_text.text(f"アクセス中: {bank} ...")
 
+                # スクレイピング実行
                 res_json_text, status, final_url = process_single_bank(
                     bank, current_url
                 )
 
+                # 結果の反映
                 if final_url:
                     df.at[i, "WebサイトURL"] = final_url
 
@@ -304,10 +330,16 @@ with col1:
                     "%Y-%m-%d %H:%M"
                 )
 
-                save_to_google_sheet(worksheet, df)
+                # ★対策2: 3件に1回、または最後にまとめて保存する（API制限回避）
+                if (i + 1) % 3 == 0 or (i + 1) == total:
+                    save_to_google_sheet(worksheet, df)
+                    status_text.text(f"データ保存中... ({i + 1}/{total})")
+                    time.sleep(2)  # 保存後に少し休む
+
                 bar.progress((i + 1) / total)
 
             status_text.success("完了！リロードします")
+            st.cache_data.clear()  # 新しいデータを反映させるためにキャッシュクリア
             time.sleep(1)
             st.rerun()
 
@@ -327,10 +359,12 @@ with col2:
                 "最終更新": ["-"] * len(bank_names),
             }
         )
-        save_to_google_sheet(worksheet, new_df)
-        st.warning("リストを初期化しました。")
-        time.sleep(1)
-        st.rerun()
+        if worksheet:
+            save_to_google_sheet(worksheet, new_df)
+            st.cache_data.clear()
+            st.warning("リストを初期化しました。")
+            time.sleep(1)
+            st.rerun()
 
 st.markdown("---")
 if df is not None:
@@ -342,5 +376,7 @@ if df is not None:
     )
 
     if st.button("手動変更を保存"):
-        save_to_google_sheet(worksheet, edited_df)
-        st.success("スプレッドシートに保存しました")
+        if worksheet:
+            save_to_google_sheet(worksheet, edited_df)
+            st.cache_data.clear()
+            st.success("スプレッドシートに保存しました")
